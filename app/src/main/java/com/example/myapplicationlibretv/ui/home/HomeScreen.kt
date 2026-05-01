@@ -1,0 +1,1466 @@
+package com.example.myapplicationlibretv.ui.home
+
+import android.Manifest
+import android.content.ActivityNotFoundException
+import android.content.Intent
+import android.net.Uri
+import android.os.Build
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.compose.BackHandler
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.grid.GridItemSpan
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.items
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.List
+import androidx.compose.material.icons.filled.ContentPaste
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.DarkMode
+import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.LightMode
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Star
+import androidx.compose.material3.Button
+import androidx.compose.material3.Card
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.AssistChip
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.TextFieldDefaults
+import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.dp
+import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import coil.request.ImageRequest
+import coil.compose.AsyncImage
+import com.example.myapplicationlibretv.BuildConfig
+import com.example.myapplicationlibretv.download.BackgroundDownloadService
+import com.example.myapplicationlibretv.download.DownloadCenter
+import com.example.myapplicationlibretv.download.DownloadStatus
+import com.example.myapplicationlibretv.download.DownloadTaskInfo
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun HomeScreen(
+    viewModel: HomeViewModel = viewModel(),
+    darkModeEnabled: Boolean,
+    onDarkModeChange: (Boolean) -> Unit,
+    onVideoClick: (siteKey: String, videoId: Int, videoTitle: String) -> Unit,
+    onDownloadedVideoClick: (title: String, fileUri: String) -> Unit
+) {
+    val context = LocalContext.current
+    LaunchedEffect(Unit) {
+        DownloadCenter.initialize(context)
+    }
+    val videoList by viewModel.videoList.collectAsState()
+    val isLoading by viewModel.isLoading.collectAsState()
+    val errorMessage by viewModel.errorMessage.collectAsState()
+    val searchResults by viewModel.searchResults.collectAsState()
+    val searchLoading by viewModel.searchLoading.collectAsState()
+    val searchErrorMessage by viewModel.searchErrorMessage.collectAsState()
+    val searchQuery by viewModel.searchQuery.collectAsState()
+    val searchUiVisible by viewModel.searchUiVisible.collectAsState()
+    val searchHistory by viewModel.searchHistory.collectAsState()
+    val adultContentEnabled by viewModel.adultContentEnabled.collectAsState()
+    val sites by viewModel.sites.collectAsState()
+    val currentSite by viewModel.currentSite.collectAsState()
+    val favorites by viewModel.favorites.collectAsState()
+    val history by viewModel.history.collectAsState()
+    val downloadTasks by DownloadCenter.tasks.collectAsState()
+    val clipboard = LocalClipboardManager.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission(),
+        onResult = {}
+    )
+
+    var showSourceSheet by remember { mutableStateOf(false) }
+    val selectedTab by viewModel.selectedTab.collectAsState()
+    var subscriptionInput by remember { mutableStateOf("") }
+    var hiddenSettingsUnlocked by remember { mutableStateOf(false) }
+    var versionTapCount by remember { mutableIntStateOf(0) }
+
+    LaunchedEffect(Unit) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
+
+    LaunchedEffect(adultContentEnabled) {
+        if (!adultContentEnabled) {
+            hiddenSettingsUnlocked = false
+            versionTapCount = 0
+        }
+    }
+
+    DisposableEffect(lifecycleOwner, viewModel) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_START -> viewModel.setAppActive(true)
+                Lifecycle.Event.ON_STOP -> viewModel.setAppActive(false)
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
+    }
+
+    if (searchUiVisible) {
+        BackHandler(enabled = true) {
+            viewModel.setSelectedTab(0)
+            viewModel.closeSearchUi(resetQuery = true)
+            viewModel.fetchVideos(keyword = null)
+        }
+        SearchScreen(
+            searchQuery = searchQuery,
+            searchHistory = searchHistory,
+            videoList = searchResults,
+            isLoading = searchLoading,
+            errorMessage = searchErrorMessage,
+            onQueryChange = viewModel::onSearchQueryChange,
+            onSearch = {
+                val keyword = searchQuery.trim()
+                if (keyword.isNotEmpty()) {
+                    viewModel.fetchVideos(keyword)
+                }
+            },
+            onSearchHistoryClick = viewModel::onSearchHistorySelected,
+            onClearSearchHistory = viewModel::clearSearchHistory,
+            onClose = {
+                viewModel.setSelectedTab(0)
+                viewModel.closeSearchUi(resetQuery = true)
+                viewModel.fetchVideos(keyword = null)
+            },
+            onVideoClick = onVideoClick
+        )
+        return
+    }
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                navigationIcon = {
+                    IconButton(onClick = { showSourceSheet = true }) {
+                        Icon(Icons.Default.Menu, contentDescription = "Sources")
+                    }
+                },
+                title = {
+                    Surface(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(end = 8.dp)
+                            .heightIn(min = 54.dp)
+                            .clickable { viewModel.openSearchUi() },
+                        shape = RoundedCornerShape(18.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .padding(horizontal = 14.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                Icons.Default.Search,
+                                contentDescription = "打开搜索",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Text(
+                                text = if (searchQuery.isBlank()) "搜索影片或资源..." else searchQuery,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+            )
+        },
+        bottomBar = {
+            NavigationBar {
+                NavigationBarItem(
+                    selected = selectedTab == 0,
+                    onClick = { viewModel.setSelectedTab(0) },
+                    icon = { Icon(Icons.Default.Search, contentDescription = "Home") },
+                    label = { Text("首页") }
+                )
+                NavigationBarItem(
+                    selected = selectedTab == 1,
+                    onClick = { viewModel.setSelectedTab(1) },
+                    icon = { Icon(Icons.Default.Star, contentDescription = "Favorites") },
+                    label = { Text("收藏") }
+                )
+                NavigationBarItem(
+                    selected = selectedTab == 2,
+                    onClick = { viewModel.setSelectedTab(2) },
+                    icon = { Icon(Icons.AutoMirrored.Filled.List, contentDescription = "History") },
+                    label = { Text("历史") }
+                )
+                NavigationBarItem(
+                    selected = selectedTab == 3,
+                    onClick = { viewModel.setSelectedTab(3) },
+                    icon = { Icon(Icons.Default.Download, contentDescription = "Downloads") },
+                    label = { Text("下载") }
+                )
+            }
+        }
+    ) { paddingValues ->
+        if (showSourceSheet) {
+            ModalBottomSheet(
+                onDismissRequest = { showSourceSheet = false }
+            ) {
+                BoxWithConstraints(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .navigationBarsPadding()
+                ) {
+                    val sourceListMaxHeight = maxHeight * 0.42f
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 8.dp)
+                    ) {
+                        Text("订阅源", style = MaterialTheme.typography.titleLarge)
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "当前共 ${sites.size} 个源",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+                        OutlinedTextField(
+                            value = subscriptionInput,
+                            onValueChange = { subscriptionInput = it },
+                            modifier = Modifier.fillMaxWidth(),
+                            placeholder = { Text("粘贴订阅链接或 CMS API（支持多条）") },
+                            minLines = 3
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            OutlinedButton(
+                                onClick = {
+                                    val text = clipboard.getText()?.text.orEmpty()
+                                    if (text.isNotBlank()) {
+                                        subscriptionInput = if (subscriptionInput.isBlank()) text else "$subscriptionInput\n$text"
+                                    }
+                                },
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Icon(Icons.Default.ContentPaste, contentDescription = null)
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("粘贴")
+                            }
+                            Button(
+                                onClick = {
+                                    viewModel.importSubscriptions(subscriptionInput)
+                                    subscriptionInput = ""
+                                    showSourceSheet = false
+                                },
+                                enabled = !isLoading,
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Text("导入并检测")
+                            }
+                        }
+                        Spacer(modifier = Modifier.height(8.dp))
+                        OutlinedButton(
+                            onClick = { viewModel.fetchVideos() },
+                            enabled = !isLoading,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text("刷新列表")
+                        }
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Surface(
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = MaterialTheme.shapes.medium,
+                            color = MaterialTheme.colorScheme.surfaceVariant
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 12.dp, vertical = 12.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text("夜间模式")
+                                    Text(
+                                        text = "开启后使用深色界面，适合夜间观看。",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(
+                                        imageVector = if (darkModeEnabled) Icons.Default.DarkMode else Icons.Default.LightMode,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Switch(
+                                        checked = darkModeEnabled,
+                                        onCheckedChange = onDarkModeChange
+                                    )
+                                }
+                            }
+                        }
+                        if (hiddenSettingsUnlocked) {
+                            Spacer(modifier = Modifier.height(12.dp))
+                            Surface(
+                                modifier = Modifier.fillMaxWidth(),
+                                shape = MaterialTheme.shapes.medium,
+                                color = MaterialTheme.colorScheme.surfaceVariant
+                            ) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 12.dp, vertical = 12.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text("18+ 内容")
+                                        Text(
+                                            text = "默认关闭。关闭时严格过滤成人推荐和搜索结果。",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                    Switch(
+                                        checked = adultContentEnabled,
+                                        onCheckedChange = viewModel::setAdultContentEnabled
+                                    )
+                                }
+                            }
+                        }
+                        if (isLoading) {
+                            Spacer(modifier = Modifier.height(12.dp))
+                            LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                        }
+                        if (!errorMessage.isNullOrBlank()) {
+                            Spacer(modifier = Modifier.height(12.dp))
+                            Text(text = errorMessage!!, color = MaterialTheme.colorScheme.error)
+                        }
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Text("已加载源", style = MaterialTheme.typography.titleMedium)
+                        Spacer(modifier = Modifier.height(8.dp))
+                        LazyColumn(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = 220.dp, max = sourceListMaxHeight),
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            items(sites, key = { it.api }) { site ->
+                                Surface(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable {
+                                            viewModel.onSiteSelected(site)
+                                            showSourceSheet = false
+                                        },
+                                    shape = MaterialTheme.shapes.medium,
+                                    color = if (site.key == currentSite?.key) {
+                                        MaterialTheme.colorScheme.secondaryContainer
+                                    } else {
+                                        MaterialTheme.colorScheme.surfaceVariant
+                                    }
+                                ) {
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(horizontal = 12.dp, vertical = 14.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        RadioButton(
+                                            selected = site.key == currentSite?.key,
+                                            onClick = null
+                                        )
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(site.name, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                            Text(
+                                                site.api,
+                                                style = MaterialTheme.typography.bodySmall,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Spacer(modifier = Modifier.height(8.dp))
+                        TextButton(
+                            onClick = { showSourceSheet = false },
+                            modifier = Modifier.align(Alignment.End)
+                        ) {
+                            Text("关闭")
+                        }
+                        Text(
+                            text = "版本 ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier
+                                .padding(bottom = 8.dp)
+                                .clickable {
+                                    versionTapCount += 1
+                                    if (versionTapCount >= 5) {
+                                        hiddenSettingsUnlocked = true
+                                        versionTapCount = 0
+                                    }
+                                }
+                        )
+                    }
+                }
+            }
+        }
+
+        PullToRefreshBox(
+            isRefreshing = isLoading && selectedTab == 0,
+            onRefresh = { viewModel.fetchVideos() },
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(paddingValues)
+        ) {
+            when (selectedTab) {
+                0 -> HomeTabContent(
+                    videoList = videoList,
+                    isLoading = isLoading,
+                    errorMessage = errorMessage,
+                    onRetry = { viewModel.fetchVideos() },
+                    onVideoClick = onVideoClick
+                )
+                1 -> FavoritesTabContent(
+                    favorites = favorites,
+                    currentSiteName = currentSite?.name,
+                    onVideoClick = onVideoClick
+                )
+                2 -> HistoryTabContent(
+                    history = history,
+                    currentSiteName = currentSite?.name,
+                    onDeleteHistoryItem = viewModel::deleteHistoryItem,
+                    onClearAllHistory = viewModel::clearAllHistory,
+                    onVideoClick = onVideoClick
+                )
+                3 -> DownloadsTabContent(
+                    downloadTasks = downloadTasks,
+                    onPlayInApp = { task ->
+                        val fileUri = task.fileUri ?: return@DownloadsTabContent
+                        onDownloadedVideoClick(task.title, fileUri)
+                    },
+                    onPause = { task ->
+                        BackgroundDownloadService.pause(context, task.id)
+                    },
+                    onResume = { task ->
+                        BackgroundDownloadService.resume(context, task.id)
+                    },
+                    onDelete = { task ->
+                        if (task.status == DownloadStatus.COMPLETED) {
+                            DownloadCenter.delete(context, task.id, removeFile = true)
+                        } else {
+                            BackgroundDownloadService.delete(context, task.id)
+                        }
+                    },
+                    onOpenFile = { task ->
+                        val fileUri = task.fileUri ?: return@DownloadsTabContent
+                        val intent = Intent(Intent.ACTION_VIEW).apply {
+                            setDataAndType(Uri.parse(fileUri), guessMimeType(task.fileName))
+                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        }
+                        runCatching {
+                            context.startActivity(
+                                Intent.createChooser(intent, "打开下载视频").apply {
+                                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                }
+                            )
+                        }.recoverCatching {
+                            context.startActivity(intent)
+                        }.onFailure {
+                            val message = if (it is ActivityNotFoundException) {
+                                "没有可用的播放器来打开该文件"
+                            } else {
+                                "打开文件失败"
+                            }
+                            android.widget.Toast.makeText(context, message, android.widget.Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun HomeTabContent(
+    videoList: List<SourcedVideo>,
+    isLoading: Boolean,
+    errorMessage: String?,
+    onRetry: () -> Unit,
+    onVideoClick: (siteKey: String, videoId: Int, videoTitle: String) -> Unit
+) {
+    BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+        val horizontalPadding = remember(maxWidth) { calculateContentHorizontalPadding(maxWidth) }
+        if (isLoading && videoList.isEmpty()) {
+            LoadingMediaGridSkeleton(modifier = Modifier.fillMaxSize())
+            return@BoxWithConstraints
+        }
+
+        if (videoList.isEmpty()) {
+            Column(
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .padding(16.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Text(
+                    text = errorMessage ?: "没有找到资源",
+                    color = if (errorMessage != null) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Button(onClick = onRetry) {
+                    Text("重试")
+                }
+            }
+            return@BoxWithConstraints
+        }
+
+        Column(modifier = Modifier.fillMaxSize()) {
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = horizontalPadding, vertical = 8.dp),
+                shape = RoundedCornerShape(20.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 14.dp, vertical = 12.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column {
+                        Text(
+                            text = "热门影视推荐",
+                            style = MaterialTheme.typography.titleMedium
+                        )
+                        Text(
+                            text = "下拉立即刷新全网热门",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Text(
+                        text = "v${BuildConfig.VERSION_NAME}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+            if (!errorMessage.isNullOrBlank()) {
+                Text(
+                    text = errorMessage,
+                    color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.padding(horizontal = horizontalPadding, vertical = 6.dp)
+                )
+            }
+            MediaGrid(
+                modifier = Modifier.fillMaxSize(),
+                outerHorizontalPadding = horizontalPadding,
+                itemsCount = videoList.size,
+                key = { index -> "${videoList[index].siteKey}:${videoList[index].video.id}" },
+                itemContent = { index ->
+                    val item = videoList[index]
+                    VideoItemCard(
+                        title = item.video.name,
+                        imageUrl = item.video.pic,
+                        subtitle = item.siteName,
+                        meta = buildVideoMeta(item.video),
+                        onClick = { onVideoClick(item.siteKey, item.video.id, item.video.name) }
+                    )
+                }
+            )
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SearchScreen(
+    searchQuery: String,
+    searchHistory: List<String>,
+    videoList: List<SourcedVideo>,
+    isLoading: Boolean,
+    errorMessage: String?,
+    onQueryChange: (String) -> Unit,
+    onSearch: () -> Unit,
+    onSearchHistoryClick: (String) -> Unit,
+    onClearSearchHistory: () -> Unit,
+    onClose: () -> Unit,
+    onVideoClick: (siteKey: String, videoId: Int, videoTitle: String) -> Unit
+) {
+    Surface(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background),
+        color = MaterialTheme.colorScheme.background
+    ) {
+        BoxWithConstraints(
+            modifier = Modifier
+                .fillMaxSize()
+                .statusBarsPadding()
+                .navigationBarsPadding()
+        ) {
+            val horizontalPadding = remember(maxWidth) { calculateContentHorizontalPadding(maxWidth) }
+            Column(
+                modifier = Modifier.fillMaxSize()
+            ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = horizontalPadding, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                IconButton(onClick = onClose) {
+                    Icon(Icons.Default.Close, contentDescription = "关闭搜索")
+                }
+                OutlinedTextField(
+                    value = searchQuery,
+                    onValueChange = onQueryChange,
+                    modifier = Modifier
+                        .weight(1f)
+                        .heightIn(min = 56.dp),
+                    placeholder = { Text("搜索影片、演员、导演或关键词...") },
+                    singleLine = true,
+                    trailingIcon = {
+                        IconButton(onClick = onSearch) {
+                            Icon(Icons.Default.Search, contentDescription = "搜索")
+                        }
+                    },
+                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(imeAction = ImeAction.Search),
+                    keyboardActions = androidx.compose.foundation.text.KeyboardActions(
+                        onSearch = { onSearch() }
+                    ),
+                    colors = TextFieldDefaults.colors(
+                        unfocusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
+                        focusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
+                        unfocusedIndicatorColor = androidx.compose.ui.graphics.Color.Transparent,
+                        focusedIndicatorColor = androidx.compose.ui.graphics.Color.Transparent
+                    ),
+                    shape = RoundedCornerShape(22.dp)
+                )
+            }
+
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(MaterialTheme.colorScheme.background)
+            ) {
+                if (searchQuery.isBlank() && searchHistory.isNotEmpty()) {
+                    Column(modifier = Modifier.fillMaxSize()) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = horizontalPadding, vertical = 8.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text("搜索历史", style = MaterialTheme.typography.titleMedium)
+                            TextButton(onClick = onClearSearchHistory) {
+                                Text("清空")
+                            }
+                        }
+                        LazyColumn(
+                            contentPadding = PaddingValues(horizontal = horizontalPadding, vertical = 4.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            items(searchHistory, key = { it }) { keyword ->
+                                AssistChip(
+                                    onClick = { onSearchHistoryClick(keyword) },
+                                    label = { Text(keyword, maxLines = 1) }
+                                )
+                            }
+                        }
+                    }
+                } else if (searchQuery.isBlank()) {
+                    SearchIdleContent()
+                } else {
+                    SearchResultsContent(
+                        query = searchQuery,
+                        videoList = videoList,
+                        isLoading = isLoading,
+                        errorMessage = errorMessage,
+                        onRetry = onSearch,
+                        onVideoClick = onVideoClick,
+                        horizontalPadding = horizontalPadding
+                    )
+                }
+            }
+        }
+        }
+    }
+}
+
+@Composable
+private fun SearchIdleContent() {
+    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Text("输入片名、演员或关键词开始搜索")
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                text = "搜索结果会单独显示，不会混入首页热门。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}
+
+@Composable
+private fun SearchResultsContent(
+    query: String,
+    videoList: List<SourcedVideo>,
+    isLoading: Boolean,
+    errorMessage: String?,
+    onRetry: () -> Unit,
+    onVideoClick: (siteKey: String, videoId: Int, videoTitle: String) -> Unit,
+    horizontalPadding: Dp
+) {
+    Box(modifier = Modifier.fillMaxSize()) {
+        if (isLoading && videoList.isEmpty()) {
+            LoadingMediaGridSkeleton(modifier = Modifier.fillMaxSize())
+            return@Box
+        }
+
+        if (videoList.isEmpty()) {
+            Column(
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .padding(16.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Text(
+                    text = errorMessage ?: "没有找到和“$query”相关的结果",
+                    color = if (errorMessage != null) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Button(onClick = onRetry) {
+                    Text("重试")
+                }
+            }
+            return@Box
+        }
+
+        Column(modifier = Modifier.fillMaxSize()) {
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = horizontalPadding, vertical = 8.dp),
+                shape = RoundedCornerShape(20.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 14.dp, vertical = 12.dp)
+                ) {
+                    Text(
+                        text = "搜索结果",
+                        style = MaterialTheme.typography.titleMedium
+                    )
+                    Text(
+                        text = "关键词：$query",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+            if (!errorMessage.isNullOrBlank()) {
+                Text(
+                    text = errorMessage,
+                    color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.padding(horizontal = horizontalPadding, vertical = 6.dp)
+                )
+            }
+            MediaGrid(
+                modifier = Modifier.fillMaxSize(),
+                outerHorizontalPadding = horizontalPadding,
+                itemsCount = videoList.size,
+                key = { index -> "${videoList[index].siteKey}:${videoList[index].video.id}" },
+                itemContent = { index ->
+                    val item = videoList[index]
+                    VideoItemCard(
+                        title = item.video.name,
+                        imageUrl = item.video.pic,
+                        subtitle = item.siteName,
+                        meta = buildVideoMeta(item.video),
+                        onClick = { onVideoClick(item.siteKey, item.video.id, item.video.name) }
+                    )
+                }
+            )
+        }
+    }
+}
+
+@Composable
+private fun FavoritesTabContent(
+    favorites: List<com.example.myapplicationlibretv.data.db.FavoriteVideo>,
+    currentSiteName: String?,
+    onVideoClick: (siteKey: String, videoId: Int, videoTitle: String) -> Unit
+) {
+    if (favorites.isEmpty()) {
+        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Text("暂无收藏")
+        }
+        return
+    }
+
+    BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+        val horizontalPadding = remember(maxWidth) { calculateContentHorizontalPadding(maxWidth) }
+        MediaGrid(
+            modifier = Modifier.fillMaxSize(),
+            outerHorizontalPadding = horizontalPadding,
+            itemsCount = favorites.size,
+            key = { index -> favorites[index].id },
+            itemContent = { index ->
+                val favorite = favorites[index]
+                VideoItemCard(
+                    title = favorite.name,
+                    imageUrl = favorite.pic,
+                    subtitle = currentSiteName,
+                    onClick = {
+                        onVideoClick(
+                            favorite.siteKey,
+                            if (favorite.sourceVideoId != 0) favorite.sourceVideoId else favorite.id,
+                            favorite.name
+                        )
+                    }
+                )
+            }
+        )
+    }
+}
+
+@Composable
+private fun HistoryTabContent(
+    history: List<com.example.myapplicationlibretv.data.db.HistoryVideo>,
+    currentSiteName: String?,
+    onDeleteHistoryItem: (Int) -> Unit,
+    onClearAllHistory: () -> Unit,
+    onVideoClick: (siteKey: String, videoId: Int, videoTitle: String) -> Unit
+) {
+    if (history.isEmpty()) {
+        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Text("暂无历史")
+        }
+        return
+    }
+
+    BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+        val minCellWidth = remember(maxWidth) { calculateGridMinSize(maxWidth) }
+        val horizontalPadding = remember(maxWidth) { calculateContentHorizontalPadding(maxWidth) }
+        LazyVerticalGrid(
+            columns = GridCells.Adaptive(minSize = minCellWidth),
+            contentPadding = PaddingValues(horizontal = horizontalPadding, vertical = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+            modifier = Modifier.fillMaxSize()
+        ) {
+            item(span = { GridItemSpan(maxLineSpan) }) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 2.dp, vertical = 4.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("观看历史", style = MaterialTheme.typography.titleMedium)
+                    TextButton(onClick = onClearAllHistory) {
+                        Text("全部清除")
+                    }
+                }
+            }
+            items(history, key = { it.id }) { record ->
+                VideoItemCard(
+                    title = record.name,
+                    imageUrl = record.pic,
+                    subtitle = currentSiteName,
+                    meta = buildHistoryMeta(record.progress, record.duration),
+                    actionButton = {
+                        IconButton(onClick = { onDeleteHistoryItem(record.id) }) {
+                            Icon(Icons.Default.Delete, contentDescription = "删除历史")
+                        }
+                    },
+                    onClick = {
+                        onVideoClick(
+                            record.siteKey,
+                            if (record.sourceVideoId != 0) record.sourceVideoId else record.id,
+                            record.name
+                        )
+                    }
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun DownloadsTabContent(
+    downloadTasks: List<DownloadTaskInfo>,
+    onPlayInApp: (DownloadTaskInfo) -> Unit,
+    onPause: (DownloadTaskInfo) -> Unit,
+    onResume: (DownloadTaskInfo) -> Unit,
+    onDelete: (DownloadTaskInfo) -> Unit,
+    onOpenFile: (DownloadTaskInfo) -> Unit
+) {
+    if (downloadTasks.isEmpty()) {
+        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Text("暂无下载任务")
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    "在播放页点击“下载”后，这里会显示前台/后台下载状态。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+        return
+    }
+
+    val activeTasks = downloadTasks.filter {
+        it.status == DownloadStatus.QUEUED || it.status == DownloadStatus.RUNNING || it.status == DownloadStatus.PAUSED
+    }
+    val completedTasks = downloadTasks.filter { it.status == DownloadStatus.COMPLETED }
+    val failedTasks = downloadTasks.filter { it.status == DownloadStatus.FAILED }
+
+    BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+        val horizontalPadding = remember(maxWidth) { calculateContentHorizontalPadding(maxWidth) }
+        LazyColumn(
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(horizontal = horizontalPadding, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            if (activeTasks.isNotEmpty()) {
+                item {
+                    Text("正在下载", style = MaterialTheme.typography.titleMedium)
+                }
+            }
+            items(activeTasks, key = { it.id }) { task ->
+                DownloadTaskCard(
+                    task = task,
+                    onPlayInApp = onPlayInApp,
+                    onPause = onPause,
+                    onResume = onResume,
+                    onDelete = onDelete,
+                    onOpenFile = onOpenFile
+                )
+            }
+
+            if (completedTasks.isNotEmpty()) {
+                item {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text("已下载", style = MaterialTheme.typography.titleMedium)
+                }
+            }
+            items(completedTasks, key = { it.id }) { task ->
+                DownloadTaskCard(
+                    task = task,
+                    onPlayInApp = onPlayInApp,
+                    onPause = onPause,
+                    onResume = onResume,
+                    onDelete = onDelete,
+                    onOpenFile = onOpenFile
+                )
+            }
+
+            if (failedTasks.isNotEmpty()) {
+                item {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text("失败任务", style = MaterialTheme.typography.titleMedium)
+                }
+            }
+            items(failedTasks, key = { it.id }) { task ->
+                DownloadTaskCard(
+                    task = task,
+                    onPlayInApp = onPlayInApp,
+                    onPause = onPause,
+                    onResume = onResume,
+                    onDelete = onDelete,
+                    onOpenFile = onOpenFile
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun DownloadTaskCard(
+    task: DownloadTaskInfo,
+    onPlayInApp: (DownloadTaskInfo) -> Unit,
+    onPause: (DownloadTaskInfo) -> Unit,
+    onResume: (DownloadTaskInfo) -> Unit,
+    onDelete: (DownloadTaskInfo) -> Unit,
+    onOpenFile: (DownloadTaskInfo) -> Unit
+) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            Text(task.title, style = MaterialTheme.typography.titleMedium)
+            Spacer(modifier = Modifier.height(6.dp))
+            Text(
+                when (task.status) {
+                    DownloadStatus.QUEUED -> "状态：等待开始"
+                    DownloadStatus.RUNNING -> "状态：后台下载中"
+                    DownloadStatus.PAUSED -> "状态：已暂停"
+                    DownloadStatus.COMPLETED -> "状态：下载完成"
+                    DownloadStatus.FAILED -> "状态：下载失败"
+                },
+                color = when (task.status) {
+                    DownloadStatus.FAILED -> MaterialTheme.colorScheme.error
+                    DownloadStatus.COMPLETED -> MaterialTheme.colorScheme.primary
+                    else -> MaterialTheme.colorScheme.onSurface
+                }
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                task.progressText,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            task.fileName?.let {
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    "文件：$it",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            task.errorMessage?.let {
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    "错误：$it",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error
+                )
+            }
+            Spacer(modifier = Modifier.height(10.dp))
+            BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+                val compactButtons = maxWidth < 420.dp
+                if (compactButtons) {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        when (task.status) {
+                            DownloadStatus.RUNNING, DownloadStatus.QUEUED -> {
+                                OutlinedButton(
+                                    onClick = { onPause(task) },
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Text("暂停")
+                                }
+                            }
+                            DownloadStatus.PAUSED, DownloadStatus.FAILED -> {
+                                Button(
+                                    onClick = { onResume(task) },
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Text("继续")
+                                }
+                            }
+                            DownloadStatus.COMPLETED -> {
+                                Button(
+                                    onClick = { onPlayInApp(task) },
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Text("播放")
+                                }
+                                OutlinedButton(
+                                    onClick = { onOpenFile(task) },
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Text("打开")
+                                }
+                            }
+                        }
+                        OutlinedButton(
+                            onClick = { onDelete(task) },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text("删除")
+                        }
+                    }
+                } else {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        when (task.status) {
+                            DownloadStatus.RUNNING, DownloadStatus.QUEUED -> {
+                                OutlinedButton(
+                                    onClick = { onPause(task) },
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Text("暂停")
+                                }
+                            }
+                            DownloadStatus.PAUSED, DownloadStatus.FAILED -> {
+                                Button(
+                                    onClick = { onResume(task) },
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Text("继续")
+                                }
+                            }
+                            DownloadStatus.COMPLETED -> {
+                                Button(
+                                    onClick = { onPlayInApp(task) },
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Text("播放")
+                                }
+                                OutlinedButton(
+                                    onClick = { onOpenFile(task) },
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Text("打开")
+                                }
+                            }
+                        }
+                        OutlinedButton(
+                            onClick = { onDelete(task) },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("删除")
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+private fun guessMimeType(fileName: String?): String {
+    val lower = fileName.orEmpty().lowercase()
+    return when {
+        lower.endsWith(".mp4") -> "video/mp4"
+        lower.endsWith(".mkv") -> "video/x-matroska"
+        lower.endsWith(".ts") -> "video/mp2t"
+        lower.endsWith(".m3u8") -> "application/vnd.apple.mpegurl"
+        else -> "video/*"
+    }
+}
+
+@Composable
+fun VideoItemCard(
+    title: String,
+    imageUrl: String?,
+    subtitle: String? = null,
+    meta: String? = null,
+    actionButton: (@Composable () -> Unit)? = null,
+    onClick: () -> Unit
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .aspectRatio(0.68f)
+            .clickable(onClick = onClick),
+        shape = RoundedCornerShape(18.dp)
+    ) {
+        Column(modifier = Modifier.fillMaxSize()) {
+            AsyncImage(
+                model = ImageRequest.Builder(LocalContext.current)
+                    .data(imageUrl)
+                    .crossfade(false)
+                    .allowHardware(true)
+                    .build(),
+                contentDescription = title,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+                    .clip(RoundedCornerShape(topStart = 18.dp, topEnd = 18.dp)),
+                contentScale = ContentScale.Crop
+            )
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(
+                        Brush.verticalGradient(
+                            colors = listOf(
+                                MaterialTheme.colorScheme.surface,
+                                MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.92f)
+                            )
+                        )
+                    )
+                    .padding(horizontal = 10.dp, vertical = 8.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.Top
+                ) {
+                    Text(
+                        text = title,
+                        style = MaterialTheme.typography.labelLarge,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        modifier = Modifier.weight(1f)
+                    )
+                    actionButton?.invoke()
+                }
+                if (!subtitle.isNullOrBlank()) {
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = subtitle,
+                        style = MaterialTheme.typography.labelSmall,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+                if (!meta.isNullOrBlank()) {
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                        text = meta,
+                        style = MaterialTheme.typography.labelSmall,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun MediaGrid(
+    modifier: Modifier = Modifier,
+    outerHorizontalPadding: Dp = 10.dp,
+    itemsCount: Int,
+    key: (Int) -> Any,
+    itemContent: @Composable (Int) -> Unit
+) {
+    BoxWithConstraints(modifier = modifier) {
+        val minCellWidth = remember(maxWidth) { calculateGridMinSize(maxWidth) }
+        LazyVerticalGrid(
+            columns = GridCells.Adaptive(minSize = minCellWidth),
+            contentPadding = PaddingValues(horizontal = outerHorizontalPadding, vertical = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+            modifier = Modifier.fillMaxSize()
+        ) {
+            items(
+                count = itemsCount,
+                key = { index -> key(index) }
+            ) { index ->
+                itemContent(index)
+            }
+            item(span = { GridItemSpan(maxLineSpan) }) {
+                Spacer(modifier = Modifier.height(8.dp))
+            }
+        }
+    }
+}
+
+private fun calculateGridMinSize(maxWidth: Dp): Dp {
+    return when {
+        maxWidth >= 900.dp -> 180.dp
+        maxWidth >= 720.dp -> 156.dp
+        maxWidth >= 520.dp -> 138.dp
+        else -> 118.dp
+    }
+}
+
+private fun calculateContentHorizontalPadding(maxWidth: Dp): Dp {
+    return when {
+        maxWidth >= 1100.dp -> 48.dp
+        maxWidth >= 900.dp -> 32.dp
+        maxWidth >= 700.dp -> 20.dp
+        else -> 12.dp
+    }
+}
+
+@Composable
+private fun LoadingMediaGridSkeleton(modifier: Modifier = Modifier) {
+    val shimmer = rememberInfiniteTransition(label = "homeLoading")
+    val alpha by shimmer.animateFloat(
+        initialValue = 0.35f,
+        targetValue = 0.8f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 850, easing = LinearEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "homeLoadingAlpha"
+    )
+
+    MediaGrid(
+        modifier = modifier,
+        itemsCount = 9,
+        key = { it },
+        itemContent = {
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .aspectRatio(0.68f),
+                shape = RoundedCornerShape(18.dp)
+            ) {
+                Column(modifier = Modifier.fillMaxSize()) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f)
+                            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = alpha))
+                    )
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 10.dp, vertical = 8.dp)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth(0.8f)
+                                .height(14.dp)
+                                .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = alpha), RoundedCornerShape(6.dp))
+                        )
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth(0.5f)
+                                .height(10.dp)
+                                .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = alpha), RoundedCornerShape(6.dp))
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth(0.9f)
+                                .height(10.dp)
+                                .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = alpha), RoundedCornerShape(6.dp))
+                        )
+                    }
+                }
+            }
+        }
+    )
+}
+
+private fun buildHistoryMeta(progress: Long, duration: Long): String? {
+    if (progress <= 0L) return null
+    val progressText = formatDuration(progress)
+    return if (duration > 0L) {
+        "看到 $progressText / ${formatDuration(duration)}"
+    } else {
+        "看到 $progressText"
+    }
+}
+
+private fun buildVideoMeta(video: com.example.myapplicationlibretv.data.model.VideoItem): String? {
+    val baseLine = listOfNotNull(
+        video.year?.trim()?.takeIf { it.isNotBlank() },
+        video.typeName?.trim()?.takeIf { it.isNotBlank() },
+        video.remarks?.trim()?.takeIf { it.isNotBlank() }
+    ).joinToString(" · ").takeIf { it.isNotBlank() }
+
+    val directorLine = video.director
+        ?.split("/", ",", "，")
+        ?.map { it.trim() }
+        ?.firstOrNull { it.isNotBlank() }
+        ?.let { "导演 $it" }
+
+    val actorLine = video.actor
+        ?.split("/", ",", "，")
+        ?.map { it.trim() }
+        ?.filter { it.isNotBlank() }
+        ?.take(2)
+        ?.joinToString(" / ")
+        ?.let { "主演 $it" }
+
+    return listOfNotNull(baseLine, directorLine, actorLine)
+        .joinToString("\n")
+        .ifBlank { null }
+}
+
+private fun formatDuration(ms: Long): String {
+    val totalSeconds = (ms / 1000).coerceAtLeast(0)
+    val seconds = (totalSeconds % 60).toInt()
+    val minutes = ((totalSeconds / 60) % 60).toInt()
+    val hours = (totalSeconds / 3600).toInt()
+    return if (hours > 0) "%d:%02d:%02d".format(hours, minutes, seconds) else "%02d:%02d".format(minutes, seconds)
+}

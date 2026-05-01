@@ -1,0 +1,1162 @@
+package com.example.myapplicationlibretv.ui.player
+
+import android.app.Activity
+import android.app.PictureInPictureParams
+import android.content.Context
+import android.content.ContextWrapper
+import android.content.pm.ActivityInfo
+import android.content.SharedPreferences
+import android.os.Build
+import android.util.Rational
+import android.view.Surface
+import android.view.View
+import android.view.ViewGroup
+import android.view.WindowManager
+import android.widget.FrameLayout
+import android.widget.ImageButton
+import androidx.annotation.OptIn
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.runtime.*
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
+import android.view.MotionEvent
+import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.foundation.layout.*
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.media3.common.AudioAttributes
+import androidx.media3.common.C
+import androidx.media3.common.Format
+import androidx.media3.common.ForwardingPlayer
+import androidx.media3.common.MediaItem
+import androidx.media3.common.Player
+import androidx.media3.common.Tracks
+import androidx.media3.common.util.UnstableApi
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.analytics.AnalyticsListener
+import androidx.media3.ui.PlayerView
+import androidx.media3.common.PlaybackException
+import android.provider.Settings
+import android.media.AudioManager
+import androidx.compose.ui.platform.LocalDensity
+import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.datasource.DefaultDataSource
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.common.util.Log
+import androidx.media3.ui.AspectRatioFrameLayout
+import com.example.myapplicationlibretv.data.api.NetworkTuning
+import com.example.myapplicationlibretv.download.BackgroundDownloadService
+import com.example.myapplicationlibretv.download.parseVideoUrl
+import com.example.myapplicationlibretv.ui.detail.PlayerEpisodePayload
+import java.net.URLDecoder
+import java.nio.charset.StandardCharsets
+import kotlin.math.abs
+import kotlin.math.roundToInt
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import javax.net.ssl.SSLContext
+import javax.net.ssl.TrustManager
+import javax.net.ssl.X509TrustManager
+import java.security.SecureRandom
+import java.security.cert.X509Certificate
+
+@OptIn(UnstableApi::class)
+@Composable
+fun PlayerScreen(
+    videoId: Int,
+    displayTitle: String,
+    videoUrl: String,
+    episodes: List<PlayerEpisodePayload> = emptyList(),
+    currentEpisodeIndex: Int = 0,
+    onPlayNext: (String, String, Int) -> Unit = { _, _, _ -> },
+    onBack: () -> Unit
+) {
+    val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val activity = context.findActivity()
+    val progressPrefs = remember(context) {
+        context.applicationContext.getSharedPreferences("player_progress", Context.MODE_PRIVATE)
+    }
+    var errorMessage by remember { mutableStateOf<String?>(null) }
+    var isControllerVisible by remember { mutableStateOf(true) }
+    var resizeModeIndex by remember { mutableIntStateOf(0) }
+    var toastMessage by remember { mutableStateOf<String?>(null) }
+    var audioInfo by remember { mutableStateOf<String?>(null) }
+    var hasAudioTrack by remember { mutableStateOf<Boolean?>(null) }
+    var playerViewRef by remember { mutableStateOf<PlayerView?>(null) }
+    var autoPlayNextTriggered by remember(videoUrl, currentEpisodeIndex) { mutableStateOf(false) }
+    var shouldKeepScreenOn by remember { mutableStateOf(false) }
+    var currentPositionMs by remember(videoId, displayTitle, videoUrl) { mutableLongStateOf(0L) }
+    var durationMs by remember(videoId, displayTitle, videoUrl) { mutableLongStateOf(0L) }
+    var introSkipDismissed by remember(videoId, displayTitle, videoUrl) { mutableStateOf(false) }
+    var outroSkipDismissed by remember(videoId, displayTitle, videoUrl) { mutableStateOf(false) }
+
+    val decodedInput = remember(videoUrl) {
+        URLDecoder.decode(videoUrl, StandardCharsets.UTF_8.name())
+    }
+    val candidates = remember(decodedInput) {
+        decodedInput
+            .split("\n")
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+    }
+    var currentIndex by remember(decodedInput) { mutableIntStateOf(0) }
+    var reloadToken by remember(decodedInput) { mutableIntStateOf(0) }
+    var isAutoSwitching by remember(decodedInput) { mutableStateOf(false) }
+    var resumeApplied by remember(videoId, decodedInput) { mutableStateOf(false) }
+    val parsed = remember(candidates, currentIndex, reloadToken) {
+        parseVideoUrl(candidates.getOrNull(currentIndex).orEmpty())
+    }
+    val isLocalPlayback = remember(parsed.url) {
+        parsed.url.startsWith("content://") || parsed.url.startsWith("file://")
+    }
+    val nextEpisode = remember(episodes, currentEpisodeIndex) {
+        episodes.getOrNull(currentEpisodeIndex + 1)
+    }
+    val progressKey = remember(videoId, displayTitle) {
+        buildProgressKey(videoId, displayTitle)
+    }
+    val savedProgress = remember(progressKey) {
+        progressPrefs.getLong(progressKey, 0L)
+    }
+    val introSkipTargetMs = remember(durationMs) {
+        when {
+            durationMs >= 90 * 60_000L -> 120_000L
+            durationMs >= 45 * 60_000L -> 95_000L
+            durationMs >= 20 * 60_000L -> 75_000L
+            durationMs >= 8 * 60_000L -> 45_000L
+            else -> 0L
+        }
+    }
+    val outroSkipWindowMs = remember(durationMs) {
+        when {
+            durationMs >= 90 * 60_000L -> 180_000L
+            durationMs >= 45 * 60_000L -> 150_000L
+            durationMs >= 20 * 60_000L -> 120_000L
+            durationMs >= 8 * 60_000L -> 75_000L
+            else -> 0L
+        }
+    }
+    val showIntroSkip = remember(currentPositionMs, durationMs, introSkipTargetMs, introSkipDismissed) {
+        !introSkipDismissed &&
+            introSkipTargetMs > 0L &&
+            durationMs > introSkipTargetMs + 60_000L &&
+            currentPositionMs in 3_000L until introSkipTargetMs
+    }
+    val showOutroSkip = remember(currentPositionMs, durationMs, outroSkipWindowMs, outroSkipDismissed, autoPlayNextTriggered) {
+        !outroSkipDismissed &&
+            !autoPlayNextTriggered &&
+            outroSkipWindowMs > 0L &&
+            durationMs > outroSkipWindowMs + 60_000L &&
+            currentPositionMs in (durationMs - outroSkipWindowMs).coerceAtLeast(0L) until (durationMs - 5_000L).coerceAtLeast(0L)
+    }
+
+    fun switchToNextCandidate(reason: String, finalReason: String) {
+        if (isAutoSwitching) return
+        if (currentIndex < candidates.lastIndex) {
+            isAutoSwitching = true
+            errorMessage = reason
+            currentIndex += 1
+        } else {
+            errorMessage = finalReason
+        }
+    }
+
+    LaunchedEffect(errorMessage, currentIndex) {
+        val msg = errorMessage ?: return@LaunchedEffect
+        if (msg.contains("自动尝试下一线路")) {
+            delay(1500)
+            if (errorMessage == msg) {
+                errorMessage = null
+            }
+        }
+    }
+
+    LaunchedEffect(currentIndex, reloadToken) {
+        isAutoSwitching = false
+        hasAudioTrack = null
+        audioInfo = null
+        resumeApplied = false
+    }
+
+    val audioManager = remember { context.getSystemService(Context.AUDIO_SERVICE) as AudioManager }
+    val originalWindowBrightness = remember(activity) {
+        activity?.window?.attributes?.screenBrightness ?: WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
+    }
+    var brightness by remember {
+        mutableFloatStateOf(
+            (activity?.window?.attributes?.screenBrightness
+                ?.takeIf { it >= 0f }
+                ?: 0.5f)
+        )
+    }
+    var volume by remember { mutableFloatStateOf(audioManager.getStreamVolume(AudioManager.STREAM_MUSIC).toFloat() / audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)) }
+    
+    var showBrightnessOverlay by remember { mutableStateOf(false) }
+    var showVolumeOverlay by remember { mutableStateOf(false) }
+    var showSeekOverlay by remember { mutableStateOf(false) }
+    var seekStartMs by remember { mutableLongStateOf(0L) }
+    var seekTargetMs by remember { mutableLongStateOf(0L) }
+    var dragAccumulatorX by remember { mutableFloatStateOf(0f) }
+    var dragAccumulatorY by remember { mutableFloatStateOf(0f) }
+    var gestureMode by remember { mutableIntStateOf(0) }
+    var manualOrientation by remember { mutableIntStateOf(ActivityInfo.SCREEN_ORIENTATION_USER_PORTRAIT) }
+    val dragThresholdPx = with(LocalDensity.current) { 18.dp.toPx() }
+    val ratioModes = remember {
+        listOf(
+            AspectRatioFrameLayout.RESIZE_MODE_FIT to "适应",
+            AspectRatioFrameLayout.RESIZE_MODE_ZOOM to "裁剪",
+            AspectRatioFrameLayout.RESIZE_MODE_FILL to "拉伸"
+        )
+    }
+    // 播放器只支持手动横竖屏切换，不跟随传感器自动旋转。
+    DisposableEffect(manualOrientation, videoId) {
+        activity?.apply {
+            requestedOrientation = manualOrientation
+            volumeControlStream = AudioManager.STREAM_MUSIC
+            val window = window
+            WindowCompat.setDecorFitsSystemWindows(window, false)
+            WindowInsetsControllerCompat(window, window.decorView).let { controller ->
+                controller.hide(WindowInsetsCompat.Type.systemBars())
+                controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            }
+        }
+        onDispose {
+            activity?.apply {
+                requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+                volumeControlStream = AudioManager.USE_DEFAULT_STREAM_TYPE
+                window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                window.attributes = window.attributes.apply {
+                    screenBrightness = originalWindowBrightness
+                }
+
+                val window = window
+                WindowCompat.setDecorFitsSystemWindows(window, true)
+                WindowInsetsControllerCompat(window, window.decorView).show(WindowInsetsCompat.Type.systemBars())
+            }
+        }
+    }
+
+    val exoPlayer = remember(parsed, currentIndex, reloadToken) {
+        // 允许所有 SSL 证书（解决部分资源站证书问题）
+        val trustAllCerts = arrayOf<TrustManager>(object : X509TrustManager {
+            override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
+            override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
+            override fun getAcceptedIssuers(): Array<X509Certificate> = arrayOf()
+        })
+        val sslContext = SSLContext.getInstance("SSL").apply {
+            init(null, trustAllCerts, SecureRandom())
+        }
+        javax.net.ssl.HttpsURLConnection.setDefaultSSLSocketFactory(sslContext.socketFactory)
+        javax.net.ssl.HttpsURLConnection.setDefaultHostnameVerifier { _, _ -> true }
+
+        val requestProperties = NetworkTuning.buildCommonHeaders(parsed.url, parsed.headers)
+
+        val httpDataSourceFactory = DefaultHttpDataSource.Factory()
+            .setAllowCrossProtocolRedirects(true)
+            .setConnectTimeoutMs(12_000)
+            .setReadTimeoutMs(20_000)
+            .setUserAgent(NetworkTuning.DESKTOP_BROWSER_UA)
+            .setDefaultRequestProperties(requestProperties)
+        val dataSourceFactory = DefaultDataSource.Factory(context, httpDataSourceFactory)
+
+        ExoPlayer.Builder(context)
+            .setMediaSourceFactory(
+                DefaultMediaSourceFactory(context).setDataSourceFactory(dataSourceFactory)
+            )
+            .build()
+            .apply {
+                setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setUsage(C.USAGE_MEDIA)
+                        .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
+                        .build(),
+                    true
+                )
+                addAnalyticsListener(
+                    object : AnalyticsListener {
+                        override fun onAudioInputFormatChanged(
+                            eventTime: AnalyticsListener.EventTime,
+                            format: Format,
+                            decoderReuseEvaluation: androidx.media3.exoplayer.DecoderReuseEvaluation?
+                        ) {
+                            val mime = format.sampleMimeType
+                            val channels = format.channelCount.takeIf { it > 0 }
+                            val rate = format.sampleRate.takeIf { it > 0 }
+                            audioInfo = listOfNotNull(
+                                mime,
+                                channels?.let { "${it}ch" },
+                                rate?.let { "${it}Hz" }
+                            ).joinToString(" ")
+                        }
+
+                        override fun onAudioSinkError(
+                            eventTime: AnalyticsListener.EventTime,
+                            audioSinkError: Exception
+                        ) {
+                            switchToNextCandidate(
+                                reason = "音频异常，自动尝试下一线路...",
+                                finalReason = "音频异常: ${audioSinkError.localizedMessage ?: "Unknown error"}"
+                            )
+                        }
+
+                        override fun onLoadError(
+                            eventTime: AnalyticsListener.EventTime,
+                            loadEventInfo: androidx.media3.exoplayer.source.LoadEventInfo,
+                            mediaLoadData: androidx.media3.exoplayer.source.MediaLoadData,
+                            error: java.io.IOException,
+                            wasCanceled: Boolean
+                        ) {
+                            if (wasCanceled) return
+                            if (mediaLoadData.trackType != C.TRACK_TYPE_AUDIO) return
+                            switchToNextCandidate(
+                                reason = "音频加载失败，自动尝试下一线路...",
+                                finalReason = "音频加载失败: ${error.localizedMessage ?: "网络错误"}"
+                            )
+                        }
+                    }
+                )
+                val mediaItem = MediaItem.Builder()
+                    .setUri(parsed.url)
+                    .build()
+                setMediaItem(mediaItem)
+                prepare()
+                playWhenReady = true
+                
+                addListener(object : Player.Listener {
+                    override fun onPlayerError(error: PlaybackException) {
+                        Log.e("PlayerScreen", "Playback Error: ${error.errorCodeName}(${error.errorCode})", error)
+                        switchToNextCandidate(
+                            reason = "线路${currentIndex + 1}播放失败，自动尝试下一线路...",
+                            finalReason = "当前资源无法播放: ${error.localizedMessage ?: "网络错误"}"
+                        )
+                    }
+
+                    override fun onPlaybackStateChanged(playbackState: Int) {
+                        if (playbackState == Player.STATE_READY) {
+                            isAutoSwitching = false
+                            playerViewRef?.showController()
+                            shouldKeepScreenOn = this@apply.playWhenReady
+                            durationMs = this@apply.duration.takeIf { it > 0L } ?: durationMs
+                            if (!resumeApplied && savedProgress > 5_000L) {
+                                val duration = this@apply.duration.takeIf { it > 0L } ?: 0L
+                                val safeProgress = if (duration > 0) {
+                                    savedProgress.coerceIn(0L, (duration - 3_000L).coerceAtLeast(0L))
+                                } else {
+                                    savedProgress
+                                }
+                                if (safeProgress > 0L) {
+                                    this@apply.seekTo(safeProgress)
+                                    toastMessage = "已为你续播到 ${formatTime(safeProgress)}"
+                                }
+                            }
+                            resumeApplied = true
+                            errorMessage = null
+                            autoPlayNextTriggered = false
+                        } else if (
+                            playbackState == Player.STATE_ENDED &&
+                            !isLocalPlayback &&
+                            !autoPlayNextTriggered
+                        ) {
+                            shouldKeepScreenOn = false
+                            val nextEpisode = episodes.getOrNull(currentEpisodeIndex + 1)
+                            if (nextEpisode != null && nextEpisode.playlist.isNotBlank()) {
+                                autoPlayNextTriggered = true
+                                onPlayNext(nextEpisode.title, nextEpisode.playlist, currentEpisodeIndex + 1)
+                            }
+                        } else if (playbackState == Player.STATE_IDLE) {
+                            shouldKeepScreenOn = false
+                            currentPositionMs = 0L
+                            durationMs = 0L
+                        }
+                    }
+
+                    override fun onIsPlayingChanged(isPlaying: Boolean) {
+                        shouldKeepScreenOn = isPlaying
+                    }
+
+                    override fun onEvents(player: Player, events: Player.Events) {
+                        if (
+                            events.contains(Player.EVENT_POSITION_DISCONTINUITY) ||
+                            events.contains(Player.EVENT_TIMELINE_CHANGED) ||
+                            events.contains(Player.EVENT_MEDIA_ITEM_TRANSITION)
+                        ) {
+                            currentPositionMs = player.currentPosition.coerceAtLeast(0L)
+                            durationMs = player.duration.takeIf { it > 0L } ?: durationMs
+                        }
+                    }
+
+                    override fun onTracksChanged(tracks: Tracks) {
+                        val hasAudio = tracks.groups.any { group ->
+                            group.type == C.TRACK_TYPE_AUDIO && (0 until group.length).any { i ->
+                                group.isTrackSelected(i)
+                            }
+                        }
+                        hasAudioTrack = hasAudio
+                    }
+                })
+            }
+    }
+
+    val enterPipAction by rememberUpdatedState(
+        newValue = {
+            enterPictureInPictureIfPossible(
+                activity = activity,
+                exoPlayer = exoPlayer,
+                playerView = playerViewRef
+            )
+        }
+    )
+
+    val controllerPlayer = remember(exoPlayer, nextEpisode, currentEpisodeIndex, isLocalPlayback) {
+        object : ForwardingPlayer(exoPlayer) {
+            override fun getAvailableCommands(): Player.Commands {
+                val builder = super.getAvailableCommands().buildUpon()
+                if (!isLocalPlayback && nextEpisode != null) {
+                    builder.add(Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM)
+                    builder.add(Player.COMMAND_SEEK_TO_NEXT)
+                } else {
+                    builder.remove(Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM)
+                    builder.remove(Player.COMMAND_SEEK_TO_NEXT)
+                }
+                return builder.build()
+            }
+
+            override fun seekToNextMediaItem() {
+                val target = nextEpisode ?: return
+                autoPlayNextTriggered = true
+                onPlayNext(target.title, target.playlist, currentEpisodeIndex + 1)
+            }
+
+            override fun seekToNext() {
+                seekToNextMediaItem()
+            }
+
+            override fun hasNextMediaItem(): Boolean = !isLocalPlayback && nextEpisode != null
+
+            override fun getNextMediaItemIndex(): Int {
+                return if (!isLocalPlayback && nextEpisode != null) currentEpisodeIndex + 1 else C.INDEX_UNSET
+            }
+        }
+    }
+
+    fun bindNextButton(playerView: PlayerView?) {
+        val nextButton = playerView?.findViewById<ImageButton?>(androidx.media3.ui.R.id.exo_next) ?: return
+        val enabled = !isLocalPlayback && nextEpisode != null
+        nextButton.visibility = if (enabled) View.VISIBLE else View.GONE
+        nextButton.isEnabled = enabled
+        nextButton.isClickable = enabled
+        nextButton.isFocusable = enabled
+        nextButton.alpha = if (enabled) 1f else 0.35f
+        nextButton.setOnClickListener(
+            if (!enabled) {
+                null
+            } else {
+                View.OnClickListener {
+                    val target = nextEpisode ?: return@OnClickListener
+                    autoPlayNextTriggered = true
+                    onPlayNext(target.title, target.playlist, currentEpisodeIndex + 1)
+                }
+            }
+        )
+    }
+
+    DisposableEffect(activity, exoPlayer) {
+        val action = { enterPipAction() }
+        PlayerPipController.attach(action)
+        onDispose {
+            PlayerPipController.detach(action)
+        }
+    }
+
+    DisposableEffect(lifecycleOwner, activity, exoPlayer) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_STOP && activity?.isInPictureInPictureMode != true) {
+                exoPlayer.pause()
+                shouldKeepScreenOn = false
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
+    }
+
+    DisposableEffect(activity, shouldKeepScreenOn) {
+        activity?.window?.let { window ->
+            if (shouldKeepScreenOn) {
+                window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            } else {
+                window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            }
+        }
+        onDispose {
+            activity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+    }
+
+    LaunchedEffect(exoPlayer, volume) {
+        exoPlayer.volume = volume.coerceIn(0f, 1f)
+    }
+
+    LaunchedEffect(exoPlayer, hasAudioTrack) {
+        if (hasAudioTrack == false) {
+            delay(2500)
+            if (hasAudioTrack == false) {
+                switchToNextCandidate(
+                    reason = "无音轨，自动尝试下一线路...",
+                    finalReason = "当前线路无可用音轨"
+                )
+            }
+        }
+    }
+
+    LaunchedEffect(exoPlayer, currentIndex, reloadToken) {
+        delay(12_000)
+        if (exoPlayer.playbackState != Player.STATE_READY && exoPlayer.playbackState != Player.STATE_ENDED) {
+            switchToNextCandidate(
+                reason = "线路连接超时，自动尝试下一线路...",
+                finalReason = "当前资源加载超时"
+            )
+        }
+    }
+
+    LaunchedEffect(toastMessage) {
+        if (toastMessage != null) {
+            delay(1200)
+            toastMessage = null
+        }
+    }
+
+    DisposableEffect(exoPlayer) {
+        onDispose {
+            val progress = exoPlayer.currentPosition.coerceAtLeast(0L)
+            val duration = exoPlayer.duration.takeIf { it > 0 } ?: 0L
+            saveEpisodeProgress(progressPrefs, progressKey, progress, duration)
+            exoPlayer.release()
+        }
+    }
+
+    LaunchedEffect(exoPlayer, progressKey) {
+        while (true) {
+            delay(500)
+            currentPositionMs = exoPlayer.currentPosition.coerceAtLeast(0L)
+            durationMs = exoPlayer.duration.takeIf { it > 0 } ?: durationMs
+        }
+    }
+
+    LaunchedEffect(exoPlayer, progressKey) {
+        while (true) {
+            delay(5_000)
+            val duration = exoPlayer.duration.takeIf { it > 0 } ?: 0L
+            val progress = exoPlayer.currentPosition.coerceAtLeast(0L)
+            if (progress <= 0L) continue
+            saveEpisodeProgress(progressPrefs, progressKey, progress, duration)
+        }
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black)
+            .pointerInput(Unit) {
+                detectDragGestures(
+                    onDragStart = {
+                        dragAccumulatorX = 0f
+                        dragAccumulatorY = 0f
+                        gestureMode = 0
+                        showSeekOverlay = false
+                        playerViewRef?.showController()
+                        isControllerVisible = true
+                    },
+                    onDragEnd = {
+                        showBrightnessOverlay = false
+                        showVolumeOverlay = false
+                        if (showSeekOverlay) {
+                            val duration = exoPlayer.duration
+                            val safeTarget = if (duration > 0) {
+                                seekTargetMs.coerceIn(0L, duration)
+                            } else {
+                                seekTargetMs.coerceAtLeast(0L)
+                            }
+                            if (exoPlayer.isCurrentMediaItemSeekable) {
+                                exoPlayer.seekTo(safeTarget)
+                            }
+                            showSeekOverlay = false
+                        }
+                    },
+                    onDrag = { change, dragAmount ->
+                        change.consume()
+                        dragAccumulatorX += dragAmount.x
+                        dragAccumulatorY += dragAmount.y
+
+                        if (gestureMode == 0) {
+                            val absX = abs(dragAccumulatorX)
+                            val absY = abs(dragAccumulatorY)
+                            if (absX >= dragThresholdPx && absX > absY) {
+                                gestureMode = 3
+                                seekStartMs = exoPlayer.currentPosition
+                                seekTargetMs = seekStartMs
+                                showSeekOverlay = true
+                                showBrightnessOverlay = false
+                                showVolumeOverlay = false
+                            } else if (absY >= dragThresholdPx && absY > absX) {
+                                gestureMode = if (change.position.x < size.width / 2) 1 else 2
+                                showSeekOverlay = false
+                            } else {
+                                return@detectDragGestures
+                            }
+                        }
+
+                        when (gestureMode) {
+                            1 -> {
+                                val sensitivity = 0.001f
+                                brightness = (brightness - dragAmount.y * sensitivity).coerceIn(0f, 1f)
+                                activity?.window?.let { window ->
+                                    val params = window.attributes
+                                    params.screenBrightness = brightness
+                                    window.attributes = params
+                                }
+                                showBrightnessOverlay = true
+                                showVolumeOverlay = false
+                            }
+                            2 -> {
+                                val sensitivity = 0.001f
+                                volume = (volume - dragAmount.y * sensitivity).coerceIn(0f, 1f)
+                                exoPlayer.volume = volume
+                                showVolumeOverlay = true
+                                showBrightnessOverlay = false
+                            }
+                            3 -> {
+                                val width = size.width.toFloat().coerceAtLeast(1f)
+                                val maxDeltaMs = 10 * 60 * 1000L
+                                val fullSwipeMs = 5 * 60 * 1000L
+                                val deltaMs = ((dragAccumulatorX / width) * fullSwipeMs.toFloat()).toLong()
+                                    .coerceIn(-maxDeltaMs, maxDeltaMs)
+                                val duration = exoPlayer.duration
+                                val target = seekStartMs + deltaMs
+                                seekTargetMs = if (duration > 0) {
+                                    target.coerceIn(0L, duration)
+                                } else {
+                                    target.coerceAtLeast(0L)
+                                }
+                                showSeekOverlay = true
+                                showBrightnessOverlay = false
+                                showVolumeOverlay = false
+                            }
+                        }
+                    }
+                )
+            },
+        contentAlignment = Alignment.Center
+    ) {
+        AndroidView(
+            factory = { ctx ->
+                PlayerView(ctx).apply {
+                    player = controllerPlayer
+                    useController = true
+                    setControllerShowTimeoutMs(5000)
+                    setShowNextButton(!isLocalPlayback && nextEpisode != null)
+                    setControllerVisibilityListener(
+                        PlayerView.ControllerVisibilityListener { visibility ->
+                            isControllerVisible = (visibility == View.VISIBLE)
+                            post { bindNextButton(this) }
+                        }
+                    )
+                    layoutParams = FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.MATCH_PARENT
+                    )
+                    keepScreenOn = shouldKeepScreenOn
+                    playerViewRef = this
+                    post { bindNextButton(this) }
+                }
+            },
+            update = { view ->
+                if (view.player !== controllerPlayer) {
+                    view.player = controllerPlayer
+                }
+                view.resizeMode = ratioModes[resizeModeIndex].first
+                view.setControllerShowTimeoutMs(5000)
+                view.setShowNextButton(!isLocalPlayback && nextEpisode != null)
+                view.post { bindNextButton(view) }
+                view.keepScreenOn = shouldKeepScreenOn
+            },
+            modifier = Modifier.fillMaxSize()
+        )
+
+        // 顶部控制与标题
+        if (isControllerVisible || errorMessage != null) {
+            BoxWithConstraints(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal))
+                    .padding(horizontal = 12.dp, vertical = 10.dp)
+            ) {
+                val compactTopBar = maxWidth < 560.dp
+                if (compactTopBar) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .align(Alignment.TopStart)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            IconButton(
+                                onClick = onBack,
+                                modifier = Modifier
+                                    .background(Color.Black.copy(alpha = 0.5f), androidx.compose.foundation.shape.CircleShape)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                                    contentDescription = "返回",
+                                    tint = Color.White
+                                )
+                            }
+                            TextButton(
+                                onClick = {
+                                    playerViewRef?.showController()
+                                    manualOrientation = if (manualOrientation == ActivityInfo.SCREEN_ORIENTATION_USER_PORTRAIT) {
+                                        ActivityInfo.SCREEN_ORIENTATION_USER_LANDSCAPE
+                                    } else {
+                                        ActivityInfo.SCREEN_ORIENTATION_USER_PORTRAIT
+                                    }
+                                    toastMessage = if (manualOrientation == ActivityInfo.SCREEN_ORIENTATION_USER_LANDSCAPE) {
+                                        "已切换横屏"
+                                    } else {
+                                        "已切换竖屏"
+                                    }
+                                },
+                                modifier = Modifier
+                                    .padding(start = 4.dp)
+                                    .background(Color.Black.copy(alpha = 0.5f), MaterialTheme.shapes.small)
+                            ) {
+                                Text(
+                                    text = if (manualOrientation == ActivityInfo.SCREEN_ORIENTATION_USER_LANDSCAPE) "竖屏" else "横屏",
+                                    color = Color.White
+                                )
+                            }
+                            Spacer(modifier = Modifier.weight(1f))
+                            TextButton(
+                                onClick = {
+                                    playerViewRef?.showController()
+                                    resizeModeIndex = (resizeModeIndex + 1) % ratioModes.size
+                                    toastMessage = "画面比例：${ratioModes[resizeModeIndex].second}"
+                                },
+                                modifier = Modifier
+                                    .background(Color.Black.copy(alpha = 0.5f), MaterialTheme.shapes.small)
+                            ) {
+                                Text(text = "比例", color = Color.White)
+                            }
+                            if (!isLocalPlayback) {
+                                TextButton(
+                                    onClick = {
+                                        playerViewRef?.showController()
+                                        val url = parsed.url.trim()
+                                        if (url.isBlank()) {
+                                            toastMessage = "下载失败：链接为空"
+                                            return@TextButton
+                                        }
+                                        BackgroundDownloadService.start(
+                                            context = context,
+                                            rawUrl = candidates.getOrNull(currentIndex).orEmpty(),
+                                            title = displayTitle.ifBlank { null }
+                                        )
+                                        toastMessage = if (url.contains(".m3u8", ignoreCase = true)) {
+                                            "已加入后台下载：m3u8 将自动合并为本地视频文件"
+                                        } else {
+                                            "已加入后台下载"
+                                        }
+                                    },
+                                    modifier = Modifier
+                                        .padding(start = 8.dp)
+                                        .background(Color.Black.copy(alpha = 0.5f), MaterialTheme.shapes.small)
+                                ) {
+                                    Text(text = "下载", color = Color.White)
+                                }
+                            }
+                        }
+                        if (displayTitle.isNotBlank()) {
+                            Text(
+                                text = displayTitle,
+                                color = Color.White,
+                                maxLines = 2,
+                                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(top = 8.dp)
+                                    .background(Color.Black.copy(alpha = 0.5f), MaterialTheme.shapes.small)
+                                    .padding(horizontal = 12.dp, vertical = 8.dp)
+                            )
+                        }
+                    }
+                } else {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .align(Alignment.TopStart),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        IconButton(
+                            onClick = onBack,
+                            modifier = Modifier
+                                .background(Color.Black.copy(alpha = 0.5f), androidx.compose.foundation.shape.CircleShape)
+                        ) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                                contentDescription = "返回",
+                                tint = Color.White
+                            )
+                        }
+
+                        TextButton(
+                            onClick = {
+                                playerViewRef?.showController()
+                                manualOrientation = if (manualOrientation == ActivityInfo.SCREEN_ORIENTATION_USER_PORTRAIT) {
+                                    ActivityInfo.SCREEN_ORIENTATION_USER_LANDSCAPE
+                                } else {
+                                    ActivityInfo.SCREEN_ORIENTATION_USER_PORTRAIT
+                                }
+                                toastMessage = if (manualOrientation == ActivityInfo.SCREEN_ORIENTATION_USER_LANDSCAPE) {
+                                    "已切换横屏"
+                                } else {
+                                    "已切换竖屏"
+                                }
+                            },
+                            modifier = Modifier
+                                .padding(start = 4.dp)
+                                .background(Color.Black.copy(alpha = 0.5f), MaterialTheme.shapes.small)
+                        ) {
+                            Text(
+                                text = if (manualOrientation == ActivityInfo.SCREEN_ORIENTATION_USER_LANDSCAPE) "竖屏" else "横屏",
+                                color = Color.White
+                            )
+                        }
+                        if (displayTitle.isNotBlank()) {
+                            Text(
+                                text = displayTitle,
+                                color = Color.White,
+                                maxLines = 1,
+                                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .padding(horizontal = 8.dp)
+                                    .background(Color.Black.copy(alpha = 0.5f), MaterialTheme.shapes.small)
+                                    .padding(horizontal = 12.dp, vertical = 8.dp)
+                            )
+                        } else {
+                            Spacer(modifier = Modifier.weight(1f))
+                        }
+
+                        TextButton(
+                            onClick = {
+                                playerViewRef?.showController()
+                                resizeModeIndex = (resizeModeIndex + 1) % ratioModes.size
+                                toastMessage = "画面比例：${ratioModes[resizeModeIndex].second}"
+                            },
+                            modifier = Modifier
+                                .background(Color.Black.copy(alpha = 0.5f), MaterialTheme.shapes.small)
+                        ) {
+                            Text(text = "比例", color = Color.White)
+                        }
+
+                        if (!isLocalPlayback) {
+                            TextButton(
+                                onClick = {
+                                    playerViewRef?.showController()
+                                    val url = parsed.url.trim()
+                                    if (url.isBlank()) {
+                                        toastMessage = "下载失败：链接为空"
+                                        return@TextButton
+                                    }
+                                    BackgroundDownloadService.start(
+                                        context = context,
+                                        rawUrl = candidates.getOrNull(currentIndex).orEmpty(),
+                                        title = displayTitle.ifBlank { null }
+                                    )
+                                    toastMessage = if (url.contains(".m3u8", ignoreCase = true)) {
+                                        "已加入后台下载：m3u8 将自动合并为本地视频文件"
+                                    } else {
+                                        "已加入后台下载"
+                                    }
+                                },
+                                modifier = Modifier
+                                    .padding(start = 8.dp)
+                                    .background(Color.Black.copy(alpha = 0.5f), MaterialTheme.shapes.small)
+                            ) {
+                                Text(text = "下载", color = Color.White)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if (isControllerVisible && !audioInfo.isNullOrBlank()) {
+            Text(
+                text = audioInfo!!,
+                color = Color.White,
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 24.dp)
+                    .background(Color.Black.copy(alpha = 0.35f), MaterialTheme.shapes.small)
+                    .padding(horizontal = 10.dp, vertical = 6.dp)
+            )
+        }
+
+        if (showSeekOverlay) {
+            SeekOverlay(
+                targetMs = seekTargetMs,
+                durationMs = exoPlayer.duration.takeIf { it > 0 } ?: 0L,
+                deltaMs = seekTargetMs - seekStartMs,
+                modifier = Modifier.align(Alignment.Center)
+            )
+        }
+
+        toastMessage?.let { msg ->
+            Text(
+                text = msg,
+                color = Color.White,
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(top = 48.dp)
+                    .background(Color.Black.copy(alpha = 0.6f), MaterialTheme.shapes.small)
+                    .padding(horizontal = 12.dp, vertical = 8.dp)
+            )
+        }
+
+        if (showBrightnessOverlay) {
+            OverlayIndicator(label = "亮度", value = brightness, modifier = Modifier.align(Alignment.CenterStart))
+        }
+        if (showVolumeOverlay) {
+            OverlayIndicator(label = "音量", value = volume, modifier = Modifier.align(Alignment.CenterEnd))
+        }
+
+        if (showIntroSkip || showOutroSkip) {
+            Surface(
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(end = 16.dp, bottom = 96.dp),
+                shape = MaterialTheme.shapes.large,
+                color = Color.Black.copy(alpha = 0.72f)
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    val label = if (showIntroSkip) "跳过片头" else "跳过片尾"
+                    TextButton(
+                        onClick = {
+                            if (showIntroSkip) {
+                                exoPlayer.seekTo(introSkipTargetMs)
+                                introSkipDismissed = true
+                                toastMessage = "已跳过片头"
+                            } else {
+                                val target = (durationMs - 1_500L).coerceAtLeast(currentPositionMs)
+                                exoPlayer.seekTo(target)
+                                outroSkipDismissed = true
+                                toastMessage = "已跳过片尾"
+                            }
+                            playerViewRef?.showController()
+                        }
+                    ) {
+                        Text(label, color = Color.White)
+                    }
+                    TextButton(
+                        onClick = {
+                            if (showIntroSkip) {
+                                introSkipDismissed = true
+                            } else {
+                                outroSkipDismissed = true
+                            }
+                        }
+                    ) {
+                        Text("关闭", color = Color.White.copy(alpha = 0.88f))
+                    }
+                }
+            }
+        }
+
+        errorMessage?.let { msg ->
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(top = 48.dp)
+                    .background(Color.Black.copy(alpha = 0.7f))
+                    .padding(16.dp)
+            ) {
+                Text(text = msg, color = Color.White)
+                Spacer(modifier = Modifier.height(16.dp))
+                Button(onClick = { 
+                    errorMessage = null
+                    reloadToken += 1
+                }) {
+                    Text("重试")
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun OverlayIndicator(label: String, value: Float, modifier: Modifier = Modifier) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = Color.Black.copy(alpha = 0.5f)),
+        modifier = modifier.padding(32.dp)
+    ) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            modifier = Modifier.padding(16.dp)
+        ) {
+            Text(text = label, color = Color.White, fontSize = 12.sp)
+            Spacer(modifier = Modifier.height(8.dp))
+            LinearProgressIndicator(
+                progress = { value },
+                modifier = Modifier.width(100.dp),
+                color = Color.White,
+                trackColor = Color.Gray
+            )
+        }
+    }
+}
+
+@Composable
+private fun SeekOverlay(
+    targetMs: Long,
+    durationMs: Long,
+    deltaMs: Long,
+    modifier: Modifier = Modifier
+) {
+    val sign = if (deltaMs >= 0) "+" else "-"
+    val deltaText = sign + formatTime(abs(deltaMs))
+    val positionText = if (durationMs > 0) {
+        "${formatTime(targetMs)} / ${formatTime(durationMs)}"
+    } else {
+        formatTime(targetMs)
+    }
+
+    Card(
+        colors = CardDefaults.cardColors(containerColor = Color.Black.copy(alpha = 0.6f)),
+        modifier = modifier
+    ) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            modifier = Modifier.padding(horizontal = 18.dp, vertical = 12.dp)
+        ) {
+            Text(text = deltaText, color = Color.White, fontSize = 16.sp)
+            Spacer(modifier = Modifier.height(6.dp))
+            Text(text = positionText, color = Color.White, fontSize = 12.sp)
+        }
+    }
+}
+
+private fun formatTime(ms: Long): String {
+    val totalSeconds = (ms / 1000).coerceAtLeast(0)
+    val seconds = (totalSeconds % 60).toInt()
+    val minutes = ((totalSeconds / 60) % 60).toInt()
+    val hours = (totalSeconds / 3600).toInt()
+    return if (hours > 0) {
+        "%d:%02d:%02d".format(hours, minutes, seconds)
+    } else {
+        "%02d:%02d".format(minutes, seconds)
+    }
+}
+
+private fun normalizeProgress(progress: Long, duration: Long): Long {
+    if (duration <= 0L) return progress.coerceAtLeast(0L)
+    return if (progress >= duration - 5_000L) 0L else progress.coerceIn(0L, duration)
+}
+
+private fun buildProgressKey(videoId: Int, displayTitle: String): String {
+    return "progress_${videoId}_${displayTitle.trim().ifBlank { "default" }}"
+}
+
+private fun saveEpisodeProgress(
+    prefs: SharedPreferences,
+    key: String,
+    progress: Long,
+    duration: Long
+) {
+    prefs.edit().putLong(key, normalizeProgress(progress, duration)).apply()
+}
+
+fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
+}
+
+private fun resolveCurrentOrientationLock(activity: Activity?): Int {
+    if (activity == null) return ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+    val rotation = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+        activity.display?.rotation ?: Surface.ROTATION_0
+    } else {
+        @Suppress("DEPRECATION")
+        activity.windowManager.defaultDisplay.rotation
+    }
+    return when (rotation) {
+        Surface.ROTATION_90 -> ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+        Surface.ROTATION_270 -> ActivityInfo.SCREEN_ORIENTATION_REVERSE_LANDSCAPE
+        Surface.ROTATION_180 -> ActivityInfo.SCREEN_ORIENTATION_REVERSE_PORTRAIT
+        else -> ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+    }
+}
+
+private fun enterPictureInPictureIfPossible(
+    activity: Activity?,
+    exoPlayer: ExoPlayer,
+    playerView: PlayerView?
+) {
+    if (activity == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+    if (activity.isFinishing || activity.isDestroyed || activity.isInPictureInPictureMode) return
+
+    val shouldEnterPip = exoPlayer.playbackState != Player.STATE_IDLE &&
+        exoPlayer.playbackState != Player.STATE_ENDED &&
+        (exoPlayer.isPlaying || exoPlayer.playWhenReady)
+    if (!shouldEnterPip) return
+
+    val aspectRatio = resolvePictureInPictureAspectRatio(exoPlayer, playerView)
+    val paramsBuilder = PictureInPictureParams.Builder()
+    aspectRatio?.let(paramsBuilder::setAspectRatio)
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        paramsBuilder.setAutoEnterEnabled(true)
+        paramsBuilder.setSeamlessResizeEnabled(true)
+    }
+    activity.enterPictureInPictureMode(paramsBuilder.build())
+}
+
+private fun resolvePictureInPictureAspectRatio(
+    exoPlayer: ExoPlayer,
+    playerView: PlayerView?
+): Rational? {
+    val videoSize = exoPlayer.videoSize
+    if (videoSize.width > 0 && videoSize.height > 0) {
+        return Rational(videoSize.width, videoSize.height)
+    }
+
+    val width = playerView?.width ?: 0
+    val height = playerView?.height ?: 0
+    return if (width > 0 && height > 0) Rational(width, height) else null
+}
