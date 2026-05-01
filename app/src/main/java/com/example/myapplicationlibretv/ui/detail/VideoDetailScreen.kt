@@ -37,6 +37,7 @@ import com.example.myapplicationlibretv.data.db.HistoryVideo
 import com.example.myapplicationlibretv.data.model.Site
 import com.example.myapplicationlibretv.data.model.VideoItem
 import com.example.myapplicationlibretv.data.repository.SourceRepository
+import com.example.myapplicationlibretv.utils.LocalProxyServer
 import kotlinx.serialization.Serializable
 import kotlinx.coroutines.async
 import kotlinx.coroutines.sync.Semaphore
@@ -78,6 +79,7 @@ class DetailViewModel(context: android.app.Application) : androidx.lifecycle.And
     private var currentSiteKey: String = ""
     private var currentVideoId: Int = 0
     private val currentSavedRecordId = MutableStateFlow(0)
+    private val proxyServer = LocalProxyServer.getInstance(context)
 
 @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
     val isFavorite: StateFlow<Boolean> = currentSavedRecordId.flatMapLatest { recordId ->
@@ -148,6 +150,15 @@ class DetailViewModel(context: android.app.Application) : androidx.lifecycle.And
                 }
                 _playSources.value = sources
                 detailCache[cacheKey] = baseVideo to sources
+                
+                // 预加载：在详情页即触发首个资源的 M3U8 解析与 TS 分片预热
+                sources.firstOrNull()?.episodes?.firstOrNull()?.let { firstEpisode ->
+                    val firstUrl = firstEpisode.url
+                    if (firstUrl.isNotBlank()) {
+                        val p = com.example.myapplicationlibretv.download.parseVideoUrl(firstUrl)
+                        proxyServer.prefetch(p.url, com.example.myapplicationlibretv.data.api.NetworkTuning.buildCommonHeaders(p.url, p.headers))
+                    }
+                }
             } catch (e: Exception) {
                 e.printStackTrace()
                 _videoDetail.value = null

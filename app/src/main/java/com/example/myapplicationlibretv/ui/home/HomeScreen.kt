@@ -56,6 +56,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -91,7 +92,10 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -130,6 +134,9 @@ fun HomeScreen(
     val searchUiVisible by viewModel.searchUiVisible.collectAsState()
     val searchHistory by viewModel.searchHistory.collectAsState()
     val adultContentEnabled by viewModel.adultContentEnabled.collectAsState()
+    val homeDisplayBySourceEnabled by viewModel.homeDisplayBySourceEnabled.collectAsState()
+    val homeCategories by viewModel.homeCategories.collectAsState()
+    val selectedHomeCategory by viewModel.selectedHomeCategory.collectAsState()
     val sites by viewModel.sites.collectAsState()
     val currentSite by viewModel.currentSite.collectAsState()
     val favorites by viewModel.favorites.collectAsState()
@@ -147,6 +154,9 @@ fun HomeScreen(
     var subscriptionInput by remember { mutableStateOf("") }
     var hiddenSettingsUnlocked by remember { mutableStateOf(false) }
     var versionTapCount by remember { mutableIntStateOf(0) }
+
+    // 实现“点击两下‘首页’刷新”的逻辑
+    var lastHomeTabClickTime by remember { mutableStateOf(0L) }
 
     LaunchedEffect(Unit) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -188,10 +198,10 @@ fun HomeScreen(
             isLoading = searchLoading,
             errorMessage = searchErrorMessage,
             onQueryChange = viewModel::onSearchQueryChange,
-            onSearch = {
-                val keyword = searchQuery.trim()
-                if (keyword.isNotEmpty()) {
-                    viewModel.fetchVideos(keyword)
+            onSearch = { keyword ->
+                val trimmed = keyword.trim()
+                if (trimmed.isNotEmpty()) {
+                    viewModel.fetchVideos(trimmed)
                 }
             },
             onSearchHistoryClick = viewModel::onSearchHistorySelected,
@@ -251,7 +261,18 @@ fun HomeScreen(
             NavigationBar {
                 NavigationBarItem(
                     selected = selectedTab == 0,
-                    onClick = { viewModel.setSelectedTab(0) },
+                    onClick = {
+                        if (selectedTab == 0) {
+                            val currentTime = System.currentTimeMillis()
+                            if (currentTime - lastHomeTabClickTime < 500) {
+                                // 双击逻辑
+                                viewModel.refreshAll()
+                            }
+                            lastHomeTabClickTime = currentTime
+                        } else {
+                            viewModel.setSelectedTab(0)
+                        }
+                    },
                     icon = { Icon(Icons.Default.Search, contentDescription = "Home") },
                     label = { Text("首页") }
                 )
@@ -379,6 +400,33 @@ fun HomeScreen(
                                 }
                             }
                         }
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Surface(
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = MaterialTheme.shapes.medium,
+                            color = MaterialTheme.colorScheme.surfaceVariant
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 12.dp, vertical = 12.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text("首页按源显示")
+                                    Text(
+                                        text = "默认关闭。关闭时首页聚合推荐，开启后只显示当前所选源的资源。",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                                Switch(
+                                    checked = homeDisplayBySourceEnabled,
+                                    onCheckedChange = viewModel::setHomeDisplayBySourceEnabled
+                                )
+                            }
+                        }
                         if (hiddenSettingsUnlocked || adultContentEnabled) {
                             Spacer(modifier = Modifier.height(12.dp))
                             Surface(
@@ -501,14 +549,20 @@ fun HomeScreen(
             when (selectedTab) {
                 0 -> HomeTabContent(
                     videoList = videoList,
+                    categories = homeCategories.map { it.name },
+                    selectedCategory = selectedHomeCategory,
+                    displayBySource = homeDisplayBySourceEnabled,
+                    currentSiteName = currentSite?.name,
                     isLoading = isLoading,
                     errorMessage = errorMessage,
+                    onCategorySelected = viewModel::selectHomeCategory,
                     onRetry = { viewModel.fetchVideos() },
                     onVideoClick = onVideoClick
                 )
                 1 -> FavoritesTabContent(
                     favorites = favorites,
                     currentSiteName = currentSite?.name,
+                    onDeleteFavoriteItem = viewModel::deleteFavoriteItem,
                     onVideoClick = onVideoClick
                 )
                 2 -> HistoryTabContent(
@@ -570,8 +624,13 @@ fun HomeScreen(
 @Composable
 private fun HomeTabContent(
     videoList: List<SourcedVideo>,
+    categories: List<String>,
+    selectedCategory: String,
+    displayBySource: Boolean,
+    currentSiteName: String?,
     isLoading: Boolean,
     errorMessage: String?,
+    onCategorySelected: (String) -> Unit,
     onRetry: () -> Unit,
     onVideoClick: (siteKey: String, videoId: Int, videoTitle: String) -> Unit
 ) {
@@ -618,11 +677,19 @@ private fun HomeTabContent(
                 ) {
                     Column {
                         Text(
-                            text = "热门影视推荐",
+                            text = if (displayBySource) {
+                                "${currentSiteName ?: "当前源"}资源"
+                            } else {
+                                "热门影视推荐"
+                            },
                             style = MaterialTheme.typography.titleMedium
                         )
                         Text(
-                            text = "下拉立即刷新全网热门",
+                            text = if (displayBySource) {
+                                "当前按所选源展示，可结合分类标签快速筛选。"
+                            } else {
+                                "下拉立即刷新全网热门，可按分类标签筛选。"
+                            },
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -632,6 +699,21 @@ private fun HomeTabContent(
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
+                }
+            }
+            if (categories.size > 1) {
+                LazyRow(
+                    modifier = Modifier.fillMaxWidth(),
+                    contentPadding = PaddingValues(horizontal = horizontalPadding, vertical = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    items(categories, key = { it }) { category ->
+                        FilterChip(
+                            selected = selectedCategory == category,
+                            onClick = { onCategorySelected(category) },
+                            label = { Text(category, maxLines = 1) }
+                        )
+                    }
                 }
             }
             if (!errorMessage.isNullOrBlank()) {
@@ -671,12 +753,36 @@ private fun SearchScreen(
     isLoading: Boolean,
     errorMessage: String?,
     onQueryChange: (String) -> Unit,
-    onSearch: () -> Unit,
+    onSearch: (String) -> Unit,
     onSearchHistoryClick: (String) -> Unit,
     onClearSearchHistory: () -> Unit,
     onClose: () -> Unit,
     onVideoClick: (siteKey: String, videoId: Int, videoTitle: String) -> Unit
 ) {
+    val focusManager = LocalFocusManager.current
+    val keyboardController = LocalSoftwareKeyboardController.current
+    var fieldValue by remember { mutableStateOf(TextFieldValue(searchQuery)) }
+
+    LaunchedEffect(searchQuery) {
+        if (searchQuery != fieldValue.text) {
+            fieldValue = fieldValue.copy(
+                text = searchQuery,
+                selection = androidx.compose.ui.text.TextRange(searchQuery.length)
+            )
+        }
+    }
+
+    val submitSearch = remember(fieldValue, onSearch, focusManager, keyboardController) {
+        {
+            val keyword = fieldValue.text.trim()
+            focusManager.clearFocus(force = true)
+            keyboardController?.hide()
+            if (keyword.isNotEmpty()) {
+                onSearch(keyword)
+            }
+        }
+    }
+
     Surface(
         modifier = Modifier
             .fillMaxSize()
@@ -703,21 +809,24 @@ private fun SearchScreen(
                     Icon(Icons.Default.Close, contentDescription = "关闭搜索")
                 }
                 OutlinedTextField(
-                    value = searchQuery,
-                    onValueChange = onQueryChange,
+                    value = fieldValue,
+                    onValueChange = {
+                        fieldValue = it
+                        onQueryChange(it.text)
+                    },
                     modifier = Modifier
                         .weight(1f)
                         .heightIn(min = 56.dp),
                     placeholder = { Text("搜索影片、演员、导演或关键词...") },
                     singleLine = true,
                     trailingIcon = {
-                        IconButton(onClick = onSearch) {
+                        IconButton(onClick = submitSearch) {
                             Icon(Icons.Default.Search, contentDescription = "搜索")
                         }
                     },
                     keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(imeAction = ImeAction.Search),
                     keyboardActions = androidx.compose.foundation.text.KeyboardActions(
-                        onSearch = { onSearch() }
+                        onSearch = { submitSearch() }
                     ),
                     colors = TextFieldDefaults.colors(
                         unfocusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
@@ -768,7 +877,7 @@ private fun SearchScreen(
                         videoList = videoList,
                         isLoading = isLoading,
                         errorMessage = errorMessage,
-                        onRetry = onSearch,
+                        onRetry = { submitSearch() },
                         onVideoClick = onVideoClick,
                         horizontalPadding = horizontalPadding
                     )
@@ -885,6 +994,7 @@ private fun SearchResultsContent(
 private fun FavoritesTabContent(
     favorites: List<com.example.myapplicationlibretv.data.db.FavoriteVideo>,
     currentSiteName: String?,
+    onDeleteFavoriteItem: (Int) -> Unit,
     onVideoClick: (siteKey: String, videoId: Int, videoTitle: String) -> Unit
 ) {
     if (favorites.isEmpty()) {
@@ -907,6 +1017,11 @@ private fun FavoritesTabContent(
                     title = favorite.name,
                     imageUrl = favorite.pic,
                     subtitle = currentSiteName,
+                    actionButton = {
+                        IconButton(onClick = { onDeleteFavoriteItem(favorite.id) }) {
+                            Icon(Icons.Default.Delete, contentDescription = "删除收藏")
+                        }
+                    },
                     onClick = {
                         onVideoClick(
                             favorite.siteKey,

@@ -29,8 +29,8 @@ android {
         applicationId = "com.example.myapplicationlibretv"
         minSdk = 24
         targetSdk = 35
-        versionCode = 48
-        versionName = "1.4.8"
+        versionCode = 55
+        versionName = "1.5.5"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -100,10 +100,15 @@ dependencies {
     implementation(libs.okhttp.logging)
     implementation(libs.kotlinx.serialization.json)
 
+    // NanoHTTPD
+    implementation(libs.nanohttpd)
+
     // Media3 (ExoPlayer)
     implementation(libs.androidx.media3.exoplayer)
     implementation(libs.androidx.media3.ui)
     implementation(libs.androidx.media3.hls)
+    implementation(libs.androidx.media3.datasource)
+    implementation(libs.androidx.media3.database)
 
     // Coil (Image Loading)
     implementation(libs.coil.compose)

@@ -41,6 +41,11 @@ data class SourcedVideo(
     val video: VideoItem
 )
 
+data class HomeCategory(
+    val name: String,
+    val siteTypeIds: Map<String, Int> = emptyMap()
+)
+
 class HomeViewModel(application: android.app.Application) : androidx.lifecycle.AndroidViewModel(application) {
     companion object {
         private const val MOON_TV_CONFIG_URL =
@@ -57,6 +62,7 @@ class HomeViewModel(application: android.app.Application) : androidx.lifecycle.A
         private const val HOT_CACHE_KEY = "hot_cache"
         private const val SITE_SCORE_KEY = "site_scores_v2"
         private const val ADULT_FILTER_KEY = "adult_filter_enabled"
+        private const val HOME_DISPLAY_BY_SOURCE_KEY = "home_display_by_source"
         private const val MAX_TRENDING_SITES = 18
         private const val MAX_SEARCH_SITES = 24
         private const val MAX_PERSON_SEARCH_SITES = 48
@@ -107,6 +113,12 @@ class HomeViewModel(application: android.app.Application) : androidx.lifecycle.A
     val searchHistory: StateFlow<List<String>> = _searchHistory
     private val _adultContentEnabled = MutableStateFlow(loadAdultContentEnabled())
     val adultContentEnabled: StateFlow<Boolean> = _adultContentEnabled
+    private val _homeDisplayBySourceEnabled = MutableStateFlow(loadHomeDisplayBySourceEnabled())
+    val homeDisplayBySourceEnabled: StateFlow<Boolean> = _homeDisplayBySourceEnabled
+    private val _homeCategories = MutableStateFlow(listOf(HomeCategory("全部")))
+    val homeCategories: StateFlow<List<HomeCategory>> = _homeCategories
+    private val _selectedHomeCategory = MutableStateFlow("全部")
+    val selectedHomeCategory: StateFlow<String> = _selectedHomeCategory
     private val _selectedTab = MutableStateFlow(0)
     val selectedTab: StateFlow<Int> = _selectedTab
 
@@ -124,8 +136,8 @@ class HomeViewModel(application: android.app.Application) : androidx.lifecycle.A
         viewModelScope.launch {
             ensureDefaultSubscriptions()
             loadCachedTrending()
-            fetchVideos()
-            refreshSubscriptions(manual = false)
+            // 启动时自动全量刷新订阅源与资源
+            refreshSubscriptions(manual = true)
         }
         startAutoUpdate()
     }
@@ -179,6 +191,20 @@ class HomeViewModel(application: android.app.Application) : androidx.lifecycle.A
         }
     }
 
+    fun setHomeDisplayBySourceEnabled(enabled: Boolean) {
+        prefs.edit().putBoolean(HOME_DISPLAY_BY_SOURCE_KEY, enabled).apply()
+        _homeDisplayBySourceEnabled.value = enabled
+        _selectedHomeCategory.value = "全部"
+        if (_searchQuery.value.isBlank()) {
+            fetchVideos(keyword = null)
+        }
+    }
+
+    fun selectHomeCategory(category: String) {
+        _selectedHomeCategory.value = category.ifBlank { "全部" }
+        fetchVideos(keyword = null)
+    }
+
     fun setAdultContentEnabled(enabled: Boolean) {
         prefs.edit().putBoolean(ADULT_FILTER_KEY, enabled).apply()
         _adultContentEnabled.value = enabled
@@ -202,8 +228,17 @@ class HomeViewModel(application: android.app.Application) : androidx.lifecycle.A
             _isLoading.value = true
             _errorMessage.value = null
             try {
+                val selectedCategory = _selectedHomeCategory.value
+                if (selectedCategory != "全部") {
+                    fetchCategoryVideos(selectedCategory, refreshToken)
+                    return@launch
+                }
                 val allSites = SourceRepository.getSitesSnapshot()
-                val sitesSnapshot = pickRuntimeSites(allSites, null, refreshToken)
+                val sitesSnapshot = if (_homeDisplayBySourceEnabled.value) {
+                    currentSite.value?.let(::listOf) ?: pickRuntimeSites(allSites, null, refreshToken)
+                } else {
+                    pickRuntimeSites(allSites, null, refreshToken)
+                }
                 if (sitesSnapshot.isEmpty()) {
                     _videoList.value = emptyList()
                     _errorMessage.value = "No sources"
@@ -224,12 +259,19 @@ class HomeViewModel(application: android.app.Application) : androidx.lifecycle.A
                 }
                 updateSiteHealthBatch(healthUpdates)
                 val failedCount = results.count { it.isFailure }
-                val merged = buildTrendingVideos(
-                    videos = applyContentFilter(succeeded.flatten()),
-                    refreshToken = refreshToken
-                )
+                val merged = if (_homeDisplayBySourceEnabled.value) {
+                    succeeded.flatten()
+                        .let(::applyContentFilter)
+                        .distinctBy { "${it.siteKey}:${it.video.id}" }
+                } else {
+                    buildTrendingVideos(
+                        videos = applyContentFilter(succeeded.flatten()),
+                        refreshToken = refreshToken
+                    )
+                }
 
                 _videoList.value = merged
+                _homeCategories.value = buildHomeCategoriesFromVideos(merged)
                 if (merged.isNotEmpty()) {
                     saveCachedTrending(merged)
                 }
@@ -359,6 +401,12 @@ class HomeViewModel(application: android.app.Application) : androidx.lifecycle.A
         }
     }
 
+    fun deleteFavoriteItem(videoId: Int) {
+        viewModelScope.launch(Dispatchers.IO) {
+            videoDao.deleteFavorite(videoId)
+        }
+    }
+
     fun clearAllHistory() {
         viewModelScope.launch(Dispatchers.IO) {
             videoDao.clearHistory()
@@ -391,6 +439,12 @@ class HomeViewModel(application: android.app.Application) : androidx.lifecycle.A
                 if (!isAppActive) break
                 refreshSubscriptions(manual = false)
             }
+        }
+    }
+
+    fun refreshAll() {
+        viewModelScope.launch(Dispatchers.IO) {
+            refreshSubscriptions(manual = true)
         }
     }
 
@@ -506,6 +560,77 @@ class HomeViewModel(application: android.app.Application) : androidx.lifecycle.A
         return prefs.getBoolean(ADULT_FILTER_KEY, false)
     }
 
+    private fun loadHomeDisplayBySourceEnabled(): Boolean {
+        return prefs.getBoolean(HOME_DISPLAY_BY_SOURCE_KEY, false)
+    }
+
+    private suspend fun fetchCategoryVideos(category: String, refreshToken: Long) {
+        val categoryModel = _homeCategories.value.firstOrNull { it.name == category }
+        if (categoryModel == null || categoryModel.name == "全部") {
+            _selectedHomeCategory.value = "全部"
+            fetchVideos(keyword = null)
+            return
+        }
+
+        val allSites = SourceRepository.getSitesSnapshot()
+        val candidateSites = if (_homeDisplayBySourceEnabled.value) {
+            currentSite.value?.let(::listOf) ?: emptyList()
+        } else {
+            pickRuntimeSites(allSites, null, refreshToken)
+        }
+        val sitesWithType = candidateSites.filter { site -> categoryModel.siteTypeIds[site.api] != null }
+        if (sitesWithType.isEmpty()) {
+            _videoList.value = emptyList()
+            _errorMessage.value = "当前没有可用的“$category”分类源"
+            return
+        }
+
+        val limiter = Semaphore(FETCH_CONCURRENCY)
+        val results = supervisorScope {
+            sitesWithType.map { site ->
+                async {
+                    limiter.withPermit {
+                        withTimeoutOrNull(HOT_REQUEST_TIMEOUT_MS) {
+                            runCatching {
+                                val response = fetchCmsResponse(
+                                    baseUrl = site.api,
+                                    typeId = categoryModel.siteTypeIds[site.api],
+                                    page = (((refreshToken) + site.api.hashCode()).mod(3L) + 1L).toInt()
+                                )
+                                response.list.map { video ->
+                                    SourcedVideo(
+                                        siteKey = site.key ?: site.api,
+                                        siteName = site.name,
+                                        siteApi = site.api,
+                                        video = video
+                                    )
+                                }
+                            }
+                        } ?: Result.failure(IOException("timeout"))
+                    }
+                }
+            }.map { it.await() }
+        }
+
+        val healthUpdates = mutableListOf<Pair<String, Boolean>>()
+        val succeeded = results.mapIndexedNotNull { index, result ->
+            val site = sitesWithType.getOrNull(index) ?: return@mapIndexedNotNull null
+            healthUpdates += site.api to result.isSuccess
+            result.getOrNull()
+        }
+        updateSiteHealthBatch(healthUpdates)
+        val merged = if (_homeDisplayBySourceEnabled.value) {
+            succeeded.flatten()
+                .let(::applyContentFilter)
+                .distinctBy { "${it.siteKey}:${it.video.id}" }
+        } else {
+            buildTrendingVideos(applyContentFilter(succeeded.flatten()), refreshToken)
+        }
+        _videoList.value = merged
+        _homeCategories.value = buildHomeCategoriesFromVideos(merged)
+        _errorMessage.value = if (merged.isEmpty()) "没有找到“$category”分类资源" else null
+    }
+
     private fun loadCachedTrending() {
         val cached = prefs.getString(HOT_CACHE_KEY, null).orEmpty()
         if (cached.isBlank()) return
@@ -515,6 +640,7 @@ class HomeViewModel(application: android.app.Application) : androidx.lifecycle.A
         val filtered = applyContentFilter(items)
         if (filtered.isNotEmpty()) {
             _videoList.value = filtered
+            _homeCategories.value = buildHomeCategoriesFromVideos(filtered)
         }
     }
 
@@ -1025,6 +1151,56 @@ class HomeViewModel(application: android.app.Application) : androidx.lifecycle.A
         }
         val encoded = current.entries.joinToString("\n") { (key, value) -> "$key=$value" }
         prefs.edit().putString(SITE_SCORE_KEY, encoded).apply()
+    }
+
+    private fun buildHomeCategoriesFromVideos(videos: List<SourcedVideo>): List<HomeCategory> {
+        val grouped = linkedMapOf<String, MutableMap<String, Int>>()
+        videos.forEach { item ->
+            val category = normalizeHomeCategory(item.video.typeName) ?: return@forEach
+            val typeId = item.video.typeId ?: return@forEach
+            grouped.getOrPut(category) { linkedMapOf() }.putIfAbsent(item.siteApi, typeId)
+        }
+        val sorted = grouped.entries
+            .sortedByDescending { it.value.size }
+            .map { HomeCategory(it.key, it.value) }
+            .take(18)
+        return listOf(HomeCategory("全部")) + sorted
+    }
+
+    private fun normalizeHomeCategory(typeName: String?): String? {
+        val raw = typeName?.trim().orEmpty()
+        if (raw.isBlank()) return null
+        val compact = raw
+            .replace("电影片", "电影")
+            .replace("电视剧片", "电视剧")
+            .replace("連續劇", "电视剧")
+            .replace("劇集", "电视剧")
+            .replace("综艺片", "综艺")
+            .replace("动漫片", "动漫")
+            .replace("動畫", "动漫")
+            .replace("紀錄片", "纪录片")
+            .replace("記錄片", "纪录片")
+        return when {
+            compact.contains("电影") -> "电影"
+            compact.contains("电视剧") || compact.contains("连续剧") || compact.contains("短剧") -> "电视剧"
+            compact.contains("动漫") || compact.contains("动画") -> "动漫"
+            compact.contains("综艺") -> "综艺"
+            compact.contains("纪录") -> "纪录片"
+            compact.contains("动作") -> "动作"
+            compact.contains("喜剧") -> "喜剧"
+            compact.contains("爱情") -> "爱情"
+            compact.contains("科幻") -> "科幻"
+            compact.contains("悬疑") -> "悬疑"
+            compact.contains("恐怖") -> "恐怖"
+            compact.contains("战争") -> "战争"
+            compact.contains("剧情") -> "剧情"
+            compact.contains("古装") -> "古装"
+            compact.contains("犯罪") -> "犯罪"
+            compact.contains("家庭") -> "家庭"
+            compact.contains("冒险") -> "冒险"
+            compact.contains("奇幻") -> "奇幻"
+            else -> compact.take(8)
+        }.takeIf { it.isNotBlank() }
     }
 
     override fun onCleared() {

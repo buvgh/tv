@@ -4,12 +4,12 @@
 
 ## 下载 APK
 
-- [枫林晚TV-v1.4.8-release.apk](./releases/%E6%9E%AB%E6%9E%97%E6%99%9ATV-v1.4.8-release.apk)
+- [枫林晚TV-v1.5.5-release.apk](./releases/%E6%9E%AB%E6%9E%97%E6%99%9ATV-v1.5.5-release.apk)
 
 ## 当前版本
 
-- `versionName`: `1.4.8`
-- `versionCode`: `48`
+- `versionName`: `1.5.5`
+- `versionCode`: `55`
 
 ## 主要功能
 
