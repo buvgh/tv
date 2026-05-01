@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
@@ -6,10 +8,10 @@ plugins {
     alias(libs.plugins.ksp)
 }
 
-val localProperties = java.util.Properties().apply {
+val localProperties = Properties().apply {
     val localFile = rootProject.file("local.properties")
     if (localFile.exists()) {
-        localFile.inputStream().use(::load)
+        localFile.inputStream().use { load(it) }
     }
 }
 
@@ -27,8 +29,8 @@ android {
         applicationId = "com.example.myapplicationlibretv"
         minSdk = 24
         targetSdk = 35
-        versionCode = 46
-        versionName = "1.4.6"
+        versionCode = 47
+        versionName = "1.4.7"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

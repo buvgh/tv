@@ -16,6 +16,7 @@ import android.widget.FrameLayout
 import android.widget.ImageButton
 import androidx.annotation.OptIn
 import androidx.compose.foundation.background
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.*
@@ -1022,22 +1023,47 @@ fun PlayerScreen(
 
 @Composable
 fun OverlayIndicator(label: String, value: Float, modifier: Modifier = Modifier) {
-    Card(
-        colors = CardDefaults.cardColors(containerColor = Color.Black.copy(alpha = 0.5f)),
-        modifier = modifier.padding(32.dp)
-    ) {
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            modifier = Modifier.padding(16.dp)
+    BoxWithConstraints(modifier = modifier.fillMaxHeight()) {
+        val compact = maxHeight < 420.dp
+        val indicatorHeight = if (compact) 128.dp else 168.dp
+        val indicatorWidth = if (compact) 12.dp else 14.dp
+        val indicatorPadding = if (compact) 18.dp else 24.dp
+        val labelSize = if (compact) 11.sp else 12.sp
+
+        Surface(
+            color = Color.Black.copy(alpha = 0.5f),
+            shape = RoundedCornerShape(20.dp),
+            modifier = Modifier
+                .align(Alignment.Center)
+                .padding(horizontal = indicatorPadding, vertical = 24.dp)
         ) {
-            Text(text = label, color = Color.White, fontSize = 12.sp)
-            Spacer(modifier = Modifier.height(8.dp))
-            LinearProgressIndicator(
-                progress = { value },
-                modifier = Modifier.width(100.dp),
-                color = Color.White,
-                trackColor = Color.Gray
-            )
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                modifier = Modifier.padding(horizontal = 10.dp, vertical = 14.dp)
+            ) {
+                Text(text = label, color = Color.White, fontSize = labelSize)
+                Spacer(modifier = Modifier.height(10.dp))
+                Box(
+                    modifier = Modifier
+                        .width(indicatorWidth)
+                        .height(indicatorHeight)
+                        .background(Color.White.copy(alpha = 0.18f), RoundedCornerShape(999.dp)),
+                    contentAlignment = Alignment.BottomCenter
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .fillMaxHeight(value.coerceIn(0f, 1f))
+                            .background(Color.White, RoundedCornerShape(999.dp))
+                    )
+                }
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = "${(value.coerceIn(0f, 1f) * 100).roundToInt()}%",
+                    color = Color.White.copy(alpha = 0.92f),
+                    fontSize = labelSize
+                )
+            }
         }
     }
 }
