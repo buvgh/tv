@@ -29,8 +29,8 @@ android {
         applicationId = "com.example.myapplicationlibretv"
         minSdk = 24
         targetSdk = 35
-        versionCode = 47
-        versionName = "1.4.7"
+        versionCode = 48
+        versionName = "1.4.8"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

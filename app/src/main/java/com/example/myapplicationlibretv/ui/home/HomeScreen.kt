@@ -379,7 +379,7 @@ fun HomeScreen(
                                 }
                             }
                         }
-                        if (hiddenSettingsUnlocked) {
+                        if (hiddenSettingsUnlocked || adultContentEnabled) {
                             Spacer(modifier = Modifier.height(12.dp))
                             Surface(
                                 modifier = Modifier.fillMaxWidth(),
