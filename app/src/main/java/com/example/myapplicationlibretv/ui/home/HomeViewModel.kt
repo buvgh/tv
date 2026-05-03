@@ -59,7 +59,7 @@ class HomeViewModel(application: android.app.Application) : androidx.lifecycle.A
         private const val SEARCH_REQUEST_TIMEOUT_MS = 4_500L
         private const val PERSON_SEARCH_REQUEST_TIMEOUT_MS = 7_000L
         private const val PROBE_TIMEOUT_MS = 2_500L
-        private const val SEARCH_DEBOUNCE_MS = 350L
+        private const val SEARCH_DEBOUNCE_MS = 220L
         private const val HOT_CACHE_KEY = "hot_cache"
         private const val SITE_SCORE_KEY = "site_scores_v2"
         private const val ADULT_FILTER_KEY = "adult_filter_enabled"
@@ -71,10 +71,10 @@ class HomeViewModel(application: android.app.Application) : androidx.lifecycle.A
         private const val SEARCH_FALLBACK_SITES = 8
         private const val SEARCH_FALLBACK_PAGES = 2
         private const val SEARCH_DETAIL_ENRICH_LIMIT = 36
-        private const val PERSON_SEARCH_FALLBACK_SITES = 36
-        private const val PERSON_SEARCH_FALLBACK_PAGES = 10
-        private const val PERSON_SEARCH_DETAIL_ENRICH_LIMIT = 160
-        private const val PERSON_FIELD_SEARCH_SITES = 32
+        private const val PERSON_SEARCH_FALLBACK_SITES = 24
+        private const val PERSON_SEARCH_FALLBACK_PAGES = 5
+        private const val PERSON_SEARCH_DETAIL_ENRICH_LIMIT = 72
+        private const val PERSON_FIELD_SEARCH_SITES = 36
     }
 
     private val videoDao = AppDatabase.getDatabase(application).videoDao()
@@ -317,6 +317,19 @@ class HomeViewModel(application: android.app.Application) : androidx.lifecycle.A
                     return@launch
                 }
 
+                var merged = emptyList<SourcedVideo>()
+                if (personSearchMode) {
+                    val personFieldCandidates = fetchPersonFieldSearchResults(
+                        personName = keyword,
+                        sites = sitesSnapshot.take(PERSON_FIELD_SEARCH_SITES)
+                    )
+                    merged = personFieldCandidates.distinctBy { "${it.siteKey}:${it.video.id}" }
+                    if (merged.isNotEmpty() && _searchQuery.value.trim() == keyword) {
+                        _searchResults.value = merged
+                        _searchErrorMessage.value = null
+                    }
+                }
+
                 val results = fetchSiteResults(
                     sites = sitesSnapshot,
                     searchKeyword = keyword
@@ -334,7 +347,7 @@ class HomeViewModel(application: android.app.Application) : androidx.lifecycle.A
                 val primaryResults = if (personSearchMode) {
                     enrichSearchCandidates(
                         candidates = succeeded.flatten(),
-                        enrichLimit = PERSON_SEARCH_DETAIL_ENRICH_LIMIT
+                        enrichLimit = 36
                     )
                 } else {
                     succeeded.flatten()
@@ -347,10 +360,12 @@ class HomeViewModel(application: android.app.Application) : androidx.lifecycle.A
                 } else {
                     emptyList()
                 }
-                var merged = filterSearchResults(
+                val directMerged = filterSearchResults(
                     searchKeyword = keyword,
                     videos = sourceReturned
                 ).distinctBy { "${it.siteKey}:${it.video.id}" }
+                merged = (merged + directMerged)
+                    .distinctBy { "${it.siteKey}:${it.video.id}" }
                 if (creditMatchedResults.isNotEmpty()) {
                     merged = (creditMatchedResults + merged)
                         .distinctBy { "${it.siteKey}:${it.video.id}" }
@@ -371,15 +386,6 @@ class HomeViewModel(application: android.app.Application) : androidx.lifecycle.A
                         .distinctBy { "${it.siteKey}:${it.video.id}" }
                 }
 
-                if (personSearchMode && merged.size < 30) {
-                    val personFieldCandidates = fetchPersonFieldSearchResults(
-                        personName = keyword,
-                        sites = sitesSnapshot.take(PERSON_FIELD_SEARCH_SITES)
-                    )
-                    merged = (merged + personFieldCandidates)
-                        .distinctBy { "${it.siteKey}:${it.video.id}" }
-                }
-
                 if (personSearchMode && merged.size < 20) {
                     val filmographyCandidates = fetchActorFilmographyResults(
                         actorName = keyword,
@@ -389,6 +395,7 @@ class HomeViewModel(application: android.app.Application) : androidx.lifecycle.A
                         .distinctBy { "${it.siteKey}:${it.video.id}" }
                 }
 
+                if (_searchQuery.value.trim() != keyword) return@launch
                 _searchResults.value = merged
                 if (merged.isNotEmpty()) {
                     searchCache[keyword] = merged
@@ -860,7 +867,7 @@ class HomeViewModel(application: android.app.Application) : androidx.lifecycle.A
         if (keyword.isBlank() || sites.isEmpty()) return emptyList()
 
         val limiter = Semaphore(FETCH_CONCURRENCY)
-        val searchParams = listOf("actor", "director", "vod_actor", "vod_director")
+        val searchParams = listOf("actor", "director", "vod_actor", "vod_director", "wd")
         val rawCandidates = supervisorScope {
             sites.flatMap { site ->
                 searchParams.map { param ->
@@ -868,11 +875,23 @@ class HomeViewModel(application: android.app.Application) : androidx.lifecycle.A
                         limiter.withPermit {
                             withTimeoutOrNull(PERSON_SEARCH_REQUEST_TIMEOUT_MS) {
                                 runCatching {
-                                    fetchCmsResponse(
-                                        baseUrl = site.api,
-                                        action = "detail",
-                                        extraQueryParams = mapOf(param to keyword)
-                                    ).list.map { video ->
+                                    val response = if (param == "wd") {
+                                        fetchCmsResponse(
+                                            baseUrl = site.api,
+                                            action = "detail",
+                                            keyword = keyword
+                                        )
+                                    } else {
+                                        fetchCmsResponse(
+                                            baseUrl = site.api,
+                                            action = "detail",
+                                            extraQueryParams = mapOf(param to keyword)
+                                        )
+                                    }
+                                    if (response.list.size > 80 && param != "wd") {
+                                        return@runCatching emptyList()
+                                    }
+                                    response.list.map { video ->
                                         SourcedVideo(
                                             siteKey = site.key ?: site.api,
                                             siteName = site.name,
@@ -888,12 +907,24 @@ class HomeViewModel(application: android.app.Application) : androidx.lifecycle.A
             }.map { it.await() }.flatten()
         }
 
+        val quickMatches = applyContentFilter(rawCandidates)
+            .filter { matchesPersonInCredits(keyword, it.video) }
+            .distinctBy { "${it.siteKey}:${it.video.id}" }
+        if (quickMatches.size >= 12) {
+            return quickMatches.take(120)
+        }
+
+        val trustedFieldCandidates = applyContentFilter(rawCandidates)
+            .filterNot { normalizeVideoName(it.video.name) == normalizeVideoName(keyword) }
+            .distinctBy { "${it.siteKey}:${it.video.id}" }
+            .take(36)
         val enrichedCandidates = enrichSearchCandidates(
             candidates = rawCandidates,
             enrichLimit = PERSON_SEARCH_DETAIL_ENRICH_LIMIT
         )
-        return applyContentFilter(enrichedCandidates)
+        val creditMatched = applyContentFilter(enrichedCandidates)
             .filter { matchesPersonInCredits(keyword, it.video) }
+        return (creditMatched + trustedFieldCandidates)
             .distinctBy { "${it.siteKey}:${it.video.id}" }
             .take(120)
     }

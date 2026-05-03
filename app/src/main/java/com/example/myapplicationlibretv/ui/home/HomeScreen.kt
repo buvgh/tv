@@ -1154,7 +1154,6 @@ private fun DownloadsTabContent(
     val failedGroups = remember(failedTasks) {
         failedTasks.groupBy { inferDownloadSeriesTitle(it.title) }
     }
-    val selectedGroupTasks = selectedDownloadSeries?.let { allGroups[it].orEmpty() }.orEmpty()
     val visibleTasks = when (selectedDownloadPage) {
         1 -> completedTasks
         2 -> failedTasks
@@ -1165,6 +1164,7 @@ private fun DownloadsTabContent(
         2 -> failedGroups
         else -> activeGroups
     }
+    val selectedGroupTasks = selectedDownloadSeries?.let { visibleGroups[it].orEmpty() }.orEmpty()
     val emptyPageText = when (selectedDownloadPage) {
         1 -> "暂无完成下载"
         2 -> "暂无失败任务"
@@ -1212,14 +1212,22 @@ private fun DownloadsTabContent(
                     }
                 }
                 items(selectedGroupTasks, key = { it.id }) { task ->
-                    DownloadTaskCard(
-                        task = task,
-                        onPlayInApp = { task -> onPlayInApp(task, selectedGroupTasks) },
-                        onPause = onPause,
-                        onResume = onResume,
-                        onDelete = onDelete,
-                        onOpenFile = onOpenFile
-                    )
+                    if (selectedDownloadPage == 1) {
+                        DownloadCompletedRow(
+                            task = task,
+                            onPlayInApp = { onPlayInApp(task, selectedGroupTasks) },
+                            onDelete = { onDelete(task) }
+                        )
+                    } else {
+                        DownloadTaskCard(
+                            task = task,
+                            onPlayInApp = { task -> onPlayInApp(task, selectedGroupTasks) },
+                            onPause = onPause,
+                            onResume = onResume,
+                            onDelete = onDelete,
+                            onOpenFile = onOpenFile
+                        )
+                    }
                 }
             }
         }
@@ -1287,14 +1295,22 @@ private fun DownloadsTabContent(
                     }
                 } else {
                     items(tasks, key = { it.id }) { task ->
-                        DownloadTaskCard(
-                            task = task,
-                            onPlayInApp = { task -> onPlayInApp(task, allGroups[inferDownloadSeriesTitle(task.title)].orEmpty()) },
-                            onPause = onPause,
-                            onResume = onResume,
-                            onDelete = onDelete,
-                            onOpenFile = onOpenFile
-                        )
+                        if (selectedDownloadPage == 1) {
+                            DownloadCompletedRow(
+                                task = task,
+                                onPlayInApp = { onPlayInApp(task, visibleGroups[inferDownloadSeriesTitle(task.title)].orEmpty()) },
+                                onDelete = { onDelete(task) }
+                            )
+                        } else {
+                            DownloadTaskCard(
+                                task = task,
+                                onPlayInApp = { task -> onPlayInApp(task, allGroups[inferDownloadSeriesTitle(task.title)].orEmpty()) },
+                                onPause = onPause,
+                                onResume = onResume,
+                                onDelete = onDelete,
+                                onOpenFile = onOpenFile
+                            )
+                        }
                     }
                 }
             }
@@ -1368,6 +1384,38 @@ private fun inferDownloadEpisodeName(title: String): String {
         ?.trim()
         ?.takeIf { it.isNotBlank() }
         ?: trimmed.ifBlank { "播放" }
+}
+
+@Composable
+private fun DownloadCompletedRow(
+    task: DownloadTaskInfo,
+    onPlayInApp: () -> Unit,
+    onDelete: () -> Unit
+) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(8.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(onClick = onPlayInApp)
+                .padding(start = 12.dp, top = 6.dp, bottom = 6.dp, end = 4.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = inferDownloadEpisodeName(task.title),
+                style = MaterialTheme.typography.bodyMedium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f)
+            )
+            IconButton(onClick = onDelete) {
+                Icon(Icons.Default.Delete, contentDescription = "删除下载")
+            }
+        }
+    }
 }
 
 @Composable
