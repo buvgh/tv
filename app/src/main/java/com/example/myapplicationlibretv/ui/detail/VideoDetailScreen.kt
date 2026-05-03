@@ -9,11 +9,14 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.items as lazyItems
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.PlayArrow
@@ -37,6 +40,7 @@ import com.example.myapplicationlibretv.data.db.HistoryVideo
 import com.example.myapplicationlibretv.data.model.Site
 import com.example.myapplicationlibretv.data.model.VideoItem
 import com.example.myapplicationlibretv.data.repository.SourceRepository
+import com.example.myapplicationlibretv.download.BackgroundDownloadService
 import com.example.myapplicationlibretv.utils.LocalProxyServer
 import kotlinx.serialization.Serializable
 import kotlinx.coroutines.async
@@ -138,7 +142,9 @@ class DetailViewModel(context: android.app.Application) : androidx.lifecycle.And
                     }.mapNotNull { it.await() }
                 }
 
-                val mergedResults = detailResults.distinctBy { it.site.api }
+                val mergedResults = detailResults
+                    .distinctBy { it.site.api }
+                    .filterStrictMatches(videoTitle, preferredSite?.api)
                 val preferredResult = mergedResults.firstOrNull { it.site.api == preferredSite?.api }
                 val baseVideo = preferredResult?.video ?: mergedResults.firstOrNull()?.video
 
@@ -248,14 +254,9 @@ class DetailViewModel(context: android.app.Application) : androidx.lifecycle.And
 
     private fun pickBestVideoMatch(candidates: List<VideoItem>, videoTitle: String): VideoItem? {
         val normalizedTarget = normalizeTitle(videoTitle)
-        return candidates.minByOrNull { candidate ->
-            val normalizedCandidate = normalizeTitle(candidate.name)
-            when {
-                normalizedCandidate == normalizedTarget -> 0
-                normalizedCandidate.contains(normalizedTarget) -> 1
-                normalizedTarget.contains(normalizedCandidate) -> 2
-                else -> 3
-            }
+        if (normalizedTarget.isBlank()) return null
+        return candidates.firstOrNull { candidate ->
+            normalizeTitle(candidate.name) == normalizedTarget
         }
     }
 
@@ -267,6 +268,20 @@ class DetailViewModel(context: android.app.Application) : androidx.lifecycle.And
 
     private fun buildSavedRecordId(siteKey: String, sourceVideoId: Int): Int {
         return "$siteKey#$sourceVideoId".hashCode()
+    }
+
+    private fun List<SiteVideoDetail>.filterStrictMatches(
+        videoTitle: String,
+        preferredApi: String?
+    ): List<SiteVideoDetail> {
+        val normalizedTarget = normalizeTitle(videoTitle)
+        if (normalizedTarget.isBlank()) return this
+        return filter { result ->
+            normalizeTitle(result.video.name) == normalizedTarget
+        }.ifEmpty {
+            // 原始源按 ID 拉回来的详情优先保留，避免标题别名造成空详情。
+            firstOrNull { it.site.api == preferredApi }?.let(::listOf).orEmpty()
+        }
     }
 }
 
@@ -284,8 +299,11 @@ fun VideoDetailScreen(
     val sources by viewModel.playSources.collectAsState()
     val isLoading by viewModel.isLoading.collectAsState()
     val isFavorite by viewModel.isFavorite.collectAsState()
+    val context = LocalContext.current
 
     var selectedSourceIndex by remember { mutableIntStateOf(0) }
+    var showDownloadSheet by remember { mutableStateOf(false) }
+    var downloadToast by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(siteKey, videoId, videoTitle) {
         viewModel.fetchDetail(siteKey, videoId, videoTitle)
@@ -364,7 +382,8 @@ fun VideoDetailScreen(
                                     selectedSourceIndex = selectedSourceIndex,
                                     videoId = videoId,
                                     viewModel = viewModel,
-                                    onPlayClick = onPlayClick
+                                    onPlayClick = onPlayClick,
+                                    onDownloadClick = { showDownloadSheet = true }
                                 )
                             }
                         } else {
@@ -393,7 +412,8 @@ fun VideoDetailScreen(
                                         selectedSourceIndex = selectedSourceIndex,
                                         videoId = videoId,
                                         viewModel = viewModel,
-                                        onPlayClick = onPlayClick
+                                        onPlayClick = onPlayClick,
+                                        onDownloadClick = { showDownloadSheet = true }
                                     )
                                 }
                             }
@@ -493,6 +513,66 @@ fun VideoDetailScreen(
             }
         }
     }
+
+    video?.let { item ->
+        val episodes = sources.getOrNull(selectedSourceIndex)?.episodes.orEmpty()
+        if (showDownloadSheet) {
+            DownloadSelectionSheet(
+                videoName = item.name,
+                episodes = episodes,
+                sources = sources,
+                selectedSourceIndex = selectedSourceIndex,
+                onDismiss = { showDownloadSheet = false },
+                onDownloadOne = { episode ->
+                    val playlist = collectFailoverUrls(sources, selectedSourceIndex, episode.name)
+                    if (playlist.isNotEmpty()) {
+                        BackgroundDownloadService.start(
+                            context = context,
+                            rawUrl = playlist.joinToString("\n"),
+                            title = buildPlayerTitle(item.name, episode.name)
+                        )
+                        downloadToast = "已加入下载：${episode.name}"
+                    }
+                    showDownloadSheet = false
+                },
+                onDownloadAll = {
+                    val tasks = episodes.mapNotNull { episode ->
+                        val playlist = collectFailoverUrls(sources, selectedSourceIndex, episode.name)
+                        playlist.takeIf { it.isNotEmpty() }?.let { episode to it }
+                    }
+                    tasks.forEach { (episode, playlist) ->
+                        BackgroundDownloadService.start(
+                            context = context,
+                            rawUrl = playlist.joinToString("\n"),
+                            title = buildPlayerTitle(item.name, episode.name)
+                        )
+                    }
+                    downloadToast = "已加入批量下载：${tasks.size} 集"
+                    showDownloadSheet = false
+                }
+            )
+        }
+    }
+
+    downloadToast?.let { message ->
+        LaunchedEffect(message) {
+            kotlinx.coroutines.delay(1400)
+            if (downloadToast == message) downloadToast = null
+        }
+        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.BottomCenter) {
+            Surface(
+                modifier = Modifier.padding(16.dp),
+                color = MaterialTheme.colorScheme.inverseSurface,
+                shape = MaterialTheme.shapes.small
+            ) {
+                Text(
+                    text = message,
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                    color = MaterialTheme.colorScheme.inverseOnSurface
+                )
+            }
+        }
+    }
 }
 
 data class PlaySource(val name: String, val episodes: List<Episode>)
@@ -521,35 +601,104 @@ private fun DetailPlayButton(
     selectedSourceIndex: Int,
     videoId: Int,
     viewModel: DetailViewModel,
-    onPlayClick: (Int, String, String, List<PlayerEpisodePayload>, Int) -> Unit
+    onPlayClick: (Int, String, String, List<PlayerEpisodePayload>, Int) -> Unit,
+    onDownloadClick: () -> Unit
 ) {
-    Button(
-        onClick = {
-            sources.getOrNull(selectedSourceIndex)?.episodes?.firstOrNull()?.let {
-                val episodePayload = buildPlayerEpisodesPayload(
-                    sources = sources,
-                    selectedSourceIndex = selectedSourceIndex,
-                    videoName = item.name
-                )
-                val playlist = collectFailoverUrls(
-                    sources = sources,
-                    selectedSourceIndex = selectedSourceIndex,
-                    episodeName = it.name
-                )
-                viewModel.addToHistory()
-                onPlayClick(
-                    videoId,
-                    buildPlayerTitle(item.name, it.name),
-                    playlist.joinToString("\n"),
-                    episodePayload,
-                    0
-                )
-            }
-        },
-        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        Icon(Icons.Default.PlayArrow, contentDescription = null)
-        Text("立即播放")
+        Button(
+            onClick = {
+                sources.getOrNull(selectedSourceIndex)?.episodes?.firstOrNull()?.let {
+                    val episodePayload = buildPlayerEpisodesPayload(
+                        sources = sources,
+                        selectedSourceIndex = selectedSourceIndex,
+                        videoName = item.name
+                    )
+                    val playlist = collectFailoverUrls(
+                        sources = sources,
+                        selectedSourceIndex = selectedSourceIndex,
+                        episodeName = it.name
+                    )
+                    viewModel.addToHistory()
+                    onPlayClick(
+                        videoId,
+                        buildPlayerTitle(item.name, it.name),
+                        playlist.joinToString("\n"),
+                        episodePayload,
+                        0
+                    )
+                }
+            },
+            modifier = Modifier.weight(1f).heightIn(min = 48.dp)
+        ) {
+            Icon(Icons.Default.PlayArrow, contentDescription = null)
+            Text("立即播放")
+        }
+        OutlinedButton(
+            onClick = onDownloadClick,
+            enabled = sources.getOrNull(selectedSourceIndex)?.episodes?.isNotEmpty() == true,
+            modifier = Modifier.weight(1f).heightIn(min = 48.dp)
+        ) {
+            Icon(Icons.Default.Download, contentDescription = null)
+            Text("下载")
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun DownloadSelectionSheet(
+    videoName: String,
+    episodes: List<Episode>,
+    sources: List<PlaySource>,
+    selectedSourceIndex: Int,
+    onDismiss: () -> Unit,
+    onDownloadOne: (Episode) -> Unit,
+    onDownloadAll: () -> Unit
+) {
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(max = 560.dp)
+                .padding(horizontal = 16.dp)
+                .padding(bottom = 20.dp)
+        ) {
+            Text(videoName, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Spacer(modifier = Modifier.height(8.dp))
+            if (episodes.size > 1) {
+                Button(
+                    onClick = onDownloadAll,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Icon(Icons.Default.Download, contentDescription = null)
+                    Text("批量下载全部 ${episodes.size} 集")
+                }
+                Spacer(modifier = Modifier.height(8.dp))
+            }
+            LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                lazyItems(episodes, key = { it.name }) { episode ->
+                    val failoverCount = collectFailoverUrls(sources, selectedSourceIndex, episode.name).size
+                    OutlinedButton(
+                        onClick = { onDownloadOne(episode) },
+                        modifier = Modifier.fillMaxWidth(),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp)
+                    ) {
+                        Column(modifier = Modifier.weight(1f), horizontalAlignment = Alignment.Start) {
+                            Text(episode.name, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text(
+                                "自动嗅探 $failoverCount 条线路",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Icon(Icons.Default.Download, contentDescription = null)
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -684,7 +833,7 @@ fun parseSources(playFrom: String?, playUrl: String?): List<PlaySource> {
     return urlGroups.mapIndexedNotNull { index, urlGroup ->
         val name = fromNames.getOrNull(index) ?: "线路${index + 1}"
         val episodes = urlGroup.split("#").mapNotNull { epStr ->
-            val parts = epStr.split("\$")
+            val parts = epStr.split("\$", limit = 2)
             if (parts.size >= 2) {
                 Episode(name = parts[0], url = parts[1])
             } else if (parts.isNotEmpty() && parts[0].isNotBlank()) {

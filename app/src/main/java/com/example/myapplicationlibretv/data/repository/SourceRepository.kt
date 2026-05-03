@@ -200,8 +200,10 @@ object SourceRepository {
         val raw = "${site.name} ${site.key.orEmpty()} ${site.api}".lowercase()
         val compact = raw.replace(Regex("\\s+"), "")
         val strongKeywords = listOf(
-            "伦理", "伦理片", "情色", "成人", "av", "porn", "hentai", "福利", "写真",
-            "swag", "麻豆", "91", "私房", "两性", "无码", "有码", "激情", "情欲"
+            "伦理", "伦理片", "情色", "成人", "adult", "av", "r18", "18禁", "porn", "sex", "hentai",
+            "福利", "写真", "私房", "两性", "无码视频", "有码", "无码", "番号", "女优",
+            "swag", "麻豆", "91", "91porn", "pronhub", "pornhub", "xvideos", "jav", "jable",
+            "fc2", "一本道", "东京热", "加勒比", "里番", "h动漫", "黄播", "黄色", "激情", "情欲"
         )
         return strongKeywords.any { compact.contains(it) }
     }

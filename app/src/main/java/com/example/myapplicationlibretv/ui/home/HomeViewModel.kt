@@ -57,6 +57,7 @@ class HomeViewModel(application: android.app.Application) : androidx.lifecycle.A
         private const val PROBE_CONCURRENCY = 8
         private const val HOT_REQUEST_TIMEOUT_MS = 4_000L
         private const val SEARCH_REQUEST_TIMEOUT_MS = 4_500L
+        private const val PERSON_SEARCH_REQUEST_TIMEOUT_MS = 7_000L
         private const val PROBE_TIMEOUT_MS = 2_500L
         private const val SEARCH_DEBOUNCE_MS = 350L
         private const val HOT_CACHE_KEY = "hot_cache"
@@ -155,10 +156,13 @@ class HomeViewModel(application: android.app.Application) : androidx.lifecycle.A
 
     fun onSearchQueryChange(query: String) {
         _searchQuery.value = query
+        _searchErrorMessage.value = null
         if (query.isBlank()) {
             searchInputDebounceJob?.cancel()
             clearSearchState()
         } else if (_searchUiVisible.value) {
+            _searchResults.value = searchCache[query.trim()].orEmpty()
+            _searchLoading.value = true
             scheduleDebouncedSearch(query)
         }
     }
@@ -297,8 +301,11 @@ class HomeViewModel(application: android.app.Application) : androidx.lifecycle.A
             _searchLoading.value = true
             _searchErrorMessage.value = null
             try {
-                searchCache[keyword]?.let { cached ->
+                val cached = searchCache[keyword]
+                if (cached != null) {
                     _searchResults.value = cached
+                } else {
+                    _searchResults.value = emptyList()
                 }
                 val personSearchMode = isLikelyPersonQuery(keyword)
                 val allSites = SourceRepository.getSitesSnapshot()
@@ -334,10 +341,19 @@ class HomeViewModel(application: android.app.Application) : androidx.lifecycle.A
                 val sourceReturned = primaryResults
                     .let(::applyContentFilter)
                     .distinctBy { "${it.siteKey}:${it.video.id}" }
+                val creditMatchedResults = if (personSearchMode) {
+                    sourceReturned.filter { matchesPersonInCredits(keyword, it.video) }
+                } else {
+                    emptyList()
+                }
                 var merged = filterSearchResults(
                     searchKeyword = keyword,
                     videos = sourceReturned
                 ).distinctBy { "${it.siteKey}:${it.video.id}" }
+                if (creditMatchedResults.isNotEmpty()) {
+                    merged = (creditMatchedResults + merged)
+                        .distinctBy { "${it.siteKey}:${it.video.id}" }
+                }
                 if (!personSearchMode && merged.size < sourceReturned.size) {
                     merged = (merged + sourceReturned)
                         .distinctBy { "${it.siteKey}:${it.video.id}" }
@@ -657,7 +673,11 @@ class HomeViewModel(application: android.app.Application) : androidx.lifecycle.A
         refreshToken: Long? = null
     ): List<Result<List<SourcedVideo>>> {
         val limiter = Semaphore(FETCH_CONCURRENCY)
-        val timeoutMs = if (searchKeyword == null) HOT_REQUEST_TIMEOUT_MS else SEARCH_REQUEST_TIMEOUT_MS
+        val timeoutMs = when {
+            searchKeyword == null -> HOT_REQUEST_TIMEOUT_MS
+            isLikelyPersonQuery(searchKeyword) -> PERSON_SEARCH_REQUEST_TIMEOUT_MS
+            else -> SEARCH_REQUEST_TIMEOUT_MS
+        }
         return supervisorScope {
             sites.mapIndexed { index, site ->
                 async {
@@ -700,6 +720,11 @@ class HomeViewModel(application: android.app.Application) : androidx.lifecycle.A
         val limiter = Semaphore(FETCH_CONCURRENCY)
         val keyword = searchKeyword.trim()
         if (keyword.isBlank()) return emptyList()
+        val timeoutMs = if (isLikelyPersonQuery(keyword)) {
+            PERSON_SEARCH_REQUEST_TIMEOUT_MS
+        } else {
+            SEARCH_REQUEST_TIMEOUT_MS
+        }
 
         val variantKeywords = buildSearchKeywordVariants(keyword).drop(1)
         val rawCandidates = supervisorScope {
@@ -707,7 +732,7 @@ class HomeViewModel(application: android.app.Application) : androidx.lifecycle.A
                 val pageTasks = (1..pageCount).map { page ->
                     async {
                         limiter.withPermit {
-                            withTimeoutOrNull(SEARCH_REQUEST_TIMEOUT_MS) {
+                            withTimeoutOrNull(timeoutMs) {
                                 runCatching {
                                     val response = fetchCmsResponse(
                                         baseUrl = site.api,
@@ -730,7 +755,7 @@ class HomeViewModel(application: android.app.Application) : androidx.lifecycle.A
                 val variantTasks = variantKeywords.map { variant ->
                     async {
                         limiter.withPermit {
-                            withTimeoutOrNull(SEARCH_REQUEST_TIMEOUT_MS) {
+                            withTimeoutOrNull(timeoutMs) {
                                 runCatching {
                                     fetchCmsResponse(
                                         baseUrl = site.api,
@@ -753,7 +778,13 @@ class HomeViewModel(application: android.app.Application) : androidx.lifecycle.A
                 .flatten()
         }
         val enrichedCandidates = enrichSearchCandidates(rawCandidates, enrichLimit = enrichLimit)
-        return filterSearchResults(keyword, enrichedCandidates)
+        val filtered = filterSearchResults(keyword, enrichedCandidates)
+        val creditMatched = if (isLikelyPersonQuery(keyword)) {
+            enrichedCandidates.filter { matchesPersonInCredits(keyword, it.video) }
+        } else {
+            emptyList()
+        }
+        return (creditMatched + filtered)
             .distinctBy { "${it.siteKey}:${it.video.id}" }
             .take(80)
     }
@@ -774,7 +805,7 @@ class HomeViewModel(application: android.app.Application) : androidx.lifecycle.A
                 targetSites.map { site ->
                     async {
                         limiter.withPermit {
-                            withTimeoutOrNull(SEARCH_REQUEST_TIMEOUT_MS) {
+                            withTimeoutOrNull(PERSON_SEARCH_REQUEST_TIMEOUT_MS) {
                                 runCatching {
                                     fetchCmsResponse(
                                         baseUrl = site.api,
@@ -799,7 +830,14 @@ class HomeViewModel(application: android.app.Application) : androidx.lifecycle.A
             candidates = rawCandidates,
             enrichLimit = PERSON_SEARCH_DETAIL_ENRICH_LIMIT
         )
-        return filterSearchResults(actorName, applyContentFilter(enrichedCandidates))
+        val filteredCandidates = applyContentFilter(enrichedCandidates)
+        val creditMatched = filteredCandidates.filter { matchesPersonInCredits(actorName, it.video) }
+        val titleMatched = filterSearchResults(actorName, filteredCandidates)
+        val filmographyMatched = filteredCandidates.filter { candidate ->
+            val normalizedName = normalizeVideoName(candidate.video.name)
+            titles.any { title -> normalizedName == normalizeVideoName(title) }
+        }
+        return (creditMatched + titleMatched + filmographyMatched)
             .distinctBy { "${it.siteKey}:${it.video.id}" }
             .take(120)
     }
@@ -826,7 +864,7 @@ class HomeViewModel(application: android.app.Application) : androidx.lifecycle.A
                         ) {
                             return@withPermit candidate
                         }
-                        val detail = withTimeoutOrNull(SEARCH_REQUEST_TIMEOUT_MS) {
+                        val detail = withTimeoutOrNull(PERSON_SEARCH_REQUEST_TIMEOUT_MS) {
                             runCatching {
                                 fetchCmsResponse(
                                     baseUrl = candidate.siteApi,
@@ -997,6 +1035,26 @@ class HomeViewModel(application: android.app.Application) : androidx.lifecycle.A
         return 0
     }
 
+    private fun matchesPersonInCredits(keyword: String, video: VideoItem): Boolean {
+        val normalizedKeyword = normalizeVideoName(keyword)
+        if (normalizedKeyword.length < 2) return false
+        val credits = listOf(video.actor.orEmpty(), video.director.orEmpty())
+        return credits.any { creditText ->
+            if (creditText.isBlank()) return@any false
+            val normalizedCreditText = normalizeVideoName(creditText)
+            if (normalizedCreditText == normalizedKeyword) return@any true
+            val names = creditText
+                .split(Regex("[,，、/／|｜;；\\s]+"))
+                .map { normalizeVideoName(it) }
+                .filter { it.isNotBlank() }
+            names.any { name ->
+                name == normalizedKeyword ||
+                    name.contains(normalizedKeyword) ||
+                    normalizedKeyword.contains(name)
+            } || normalizedCreditText.contains(normalizedKeyword)
+        }
+    }
+
     private fun normalizeVideoName(name: String): String {
         return name.lowercase()
             .replace(Regex("\\s+"), "")
@@ -1023,20 +1081,24 @@ class HomeViewModel(application: android.app.Application) : androidx.lifecycle.A
         val compactText = rawText.replace(Regex("\\s+"), "")
 
         val strongKeywords = listOf(
-            "伦理片", "伦理剧", "情色", "成人", "无码", "有码", "无码av", "sex", "porn", "hentai",
-            "番号", "av", "sm调教", "裸聊", "乱伦", "萝莉淫", "巨乳", "淫妻", "淫乱", "欲奴",
-            "约炮", "援交", "强奸", "迷奸", "母子乱伦", "父女乱伦", "禁播", "春宫", "艳情"
+            "伦理片", "伦理剧", "情色", "成人电影", "成人视频", "成人", "18禁", "r18", "无码", "有码",
+            "无码视频", "有码视频", "sex", "porn", "porno", "hentai", "里番", "h动漫", "黄播",
+            "番号", "女优", "av女优", "jav", "fc2", "一本道", "东京热", "加勒比", "sm调教",
+            "裸聊", "裸舞", "乱伦", "母子乱伦", "父女乱伦", "萝莉淫", "巨乳", "爆乳",
+            "淫妻", "淫乱", "淫荡", "欲奴", "约炮", "援交", "强奸", "迷奸", "春宫", "艳情"
         )
         val mediumKeywords = listOf(
             "伦理", "lunli", "激情", "调教", "偷情", "欲望", "做爱", "性爱", "黄片", "黄漫",
             "成人版", "私拍", "偷拍", "露脸", "白浆", "后入", "口爆", "自拍偷拍", "国产自拍",
-            "麻豆", "91", "国产自拍", "骚货", "嫩模", "制服诱惑", "女仆", "情欲", "欲海"
+            "麻豆", "91", "91porn", "swag", "jable", "国产自拍", "骚货", "嫩模", "制服诱惑",
+            "女仆", "情欲", "欲海", "福利姬", "私房", "写真", "啪啪", "喷潮", "口交"
         )
         val adultTypeKeywords = listOf(
-            "伦理", "情色", "成人", "福利", "私房", "写真", "av", "成人视频", "两性"
+            "伦理", "情色", "成人", "福利", "私房", "写真", "av", "r18", "成人视频", "两性", "里番"
         )
         val adultSiteKeywords = listOf(
-            "麻豆", "91", "swag", "h动漫", "国产自拍", "无码", "有码", "av资源"
+            "麻豆", "91", "91porn", "swag", "h动漫", "国产自拍", "无码", "有码", "av资源",
+            "jav", "jable", "fc2", "porn", "成人资源"
         )
 
         if (strongKeywords.any { compactText.contains(it) }) return true

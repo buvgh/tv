@@ -10,12 +10,17 @@ import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import com.example.myapplicationlibretv.R
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.UUID
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 
 class BackgroundDownloadService : Service() {
     companion object {
@@ -28,10 +33,13 @@ class BackgroundDownloadService : Service() {
         private const val EXTRA_TASK_ID = "extra_task_id"
         private const val EXTRA_RAW_URL = "extra_raw_url"
         private const val EXTRA_TITLE = "extra_title"
+        private const val MAX_ACTIVE_DOWNLOADS = 3
         private val activeJobs = ConcurrentHashMap<String, Job>()
+        private val downloadLimiter = Semaphore(MAX_ACTIVE_DOWNLOADS)
+        private val runningDownloads = AtomicInteger(0)
 
         fun start(context: Context, rawUrl: String, title: String?) {
-            val taskId = System.currentTimeMillis().toString()
+            val taskId = UUID.randomUUID().toString()
             DownloadCenter.enqueue(context, taskId, title ?: "视频下载", rawUrl)
             startServiceCompat(
                 context,
@@ -124,16 +132,29 @@ class BackgroundDownloadService : Service() {
                     val targetTitle = title ?: record?.title ?: "视频下载"
 
                     runCatching {
-                        val parsed = parseVideoUrl(targetUrl)
-                        require(parsed.url.isNotBlank()) { "下载地址为空" }
-                        downloadVideoFile(
-                            context = applicationContext,
-                            taskId = taskId,
-                            parsed = parsed,
-                            displayTitle = targetTitle
-                        ) { progress ->
-                            DownloadCenter.updateProgress(applicationContext, taskId, progress)
-                            updateNotification(progress)
+                        downloadLimiter.withPermit {
+                            var reportedPlaybackQueue = false
+                            while (DownloadCenter.isPlaybackActive() && runningDownloads.get() >= 1) {
+                                if (!reportedPlaybackQueue) {
+                                    reportedPlaybackQueue = true
+                                    DownloadCenter.updateProgress(applicationContext, taskId, "播放中，下载排队让路")
+                                }
+                                delay(2_000L)
+                            }
+                            runningDownloads.incrementAndGet()
+                            try {
+                                downloadVideoInput(
+                                    context = applicationContext,
+                                    taskId = taskId,
+                                    rawInput = targetUrl,
+                                    displayTitle = targetTitle
+                                ) { progress ->
+                                    DownloadCenter.updateProgress(applicationContext, taskId, progress)
+                                    updateNotification(progress)
+                                }
+                            } finally {
+                                runningDownloads.decrementAndGet()
+                            }
                         }
                     }.onSuccess {
                         DownloadCenter.complete(applicationContext, taskId, it.fileName, it.fileUri)

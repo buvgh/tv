@@ -47,6 +47,7 @@ import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.DarkMode
+import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.LightMode
@@ -110,6 +111,7 @@ import com.example.myapplicationlibretv.download.BackgroundDownloadService
 import com.example.myapplicationlibretv.download.DownloadCenter
 import com.example.myapplicationlibretv.download.DownloadStatus
 import com.example.myapplicationlibretv.download.DownloadTaskInfo
+import com.example.myapplicationlibretv.ui.detail.PlayerEpisodePayload
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -118,7 +120,7 @@ fun HomeScreen(
     darkModeEnabled: Boolean,
     onDarkModeChange: (Boolean) -> Unit,
     onVideoClick: (siteKey: String, videoId: Int, videoTitle: String) -> Unit,
-    onDownloadedVideoClick: (title: String, fileUri: String) -> Unit
+    onDownloadedVideoClick: (title: String, fileUri: String, episodes: List<PlayerEpisodePayload>, currentEpisodeIndex: Int) -> Unit
 ) {
     val context = LocalContext.current
     LaunchedEffect(Unit) {
@@ -574,9 +576,20 @@ fun HomeScreen(
                 )
                 3 -> DownloadsTabContent(
                     downloadTasks = downloadTasks,
-                    onPlayInApp = { task ->
+                    onPlayInApp = { task, groupTasks ->
                         val fileUri = task.fileUri ?: return@DownloadsTabContent
-                        onDownloadedVideoClick(task.title, fileUri)
+                        val playableTasks = groupTasks
+                            .filter { it.status == DownloadStatus.COMPLETED && !it.fileUri.isNullOrBlank() }
+                            .sortedBy { it.title }
+                        val episodes = playableTasks.map { item ->
+                            PlayerEpisodePayload(
+                                name = inferDownloadEpisodeName(item.title),
+                                title = item.title,
+                                playlist = item.fileUri.orEmpty()
+                            )
+                        }
+                        val currentIndex = playableTasks.indexOfFirst { it.id == task.id }.coerceAtLeast(0)
+                        onDownloadedVideoClick(task.title, fileUri, episodes, currentIndex)
                     },
                     onPause = { task ->
                         BackgroundDownloadService.pause(context, task.id)
@@ -1016,7 +1029,7 @@ private fun FavoritesTabContent(
                 VideoItemCard(
                     title = favorite.name,
                     imageUrl = favorite.pic,
-                    subtitle = currentSiteName,
+                    subtitle = "收藏资源",
                     actionButton = {
                         IconButton(onClick = { onDeleteFavoriteItem(favorite.id) }) {
                             Icon(Icons.Default.Delete, contentDescription = "删除收藏")
@@ -1078,7 +1091,7 @@ private fun HistoryTabContent(
                 VideoItemCard(
                     title = record.name,
                     imageUrl = record.pic,
-                    subtitle = currentSiteName,
+                    subtitle = "观看历史",
                     meta = buildHistoryMeta(record.progress, record.duration),
                     actionButton = {
                         IconButton(onClick = { onDeleteHistoryItem(record.id) }) {
@@ -1101,12 +1114,14 @@ private fun HistoryTabContent(
 @Composable
 private fun DownloadsTabContent(
     downloadTasks: List<DownloadTaskInfo>,
-    onPlayInApp: (DownloadTaskInfo) -> Unit,
+    onPlayInApp: (DownloadTaskInfo, List<DownloadTaskInfo>) -> Unit,
     onPause: (DownloadTaskInfo) -> Unit,
     onResume: (DownloadTaskInfo) -> Unit,
     onDelete: (DownloadTaskInfo) -> Unit,
     onOpenFile: (DownloadTaskInfo) -> Unit
 ) {
+    var selectedDownloadSeries by remember { mutableStateOf<String?>(null) }
+    var selectedDownloadPage by remember { mutableIntStateOf(0) }
     if (downloadTasks.isEmpty()) {
         Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -1127,6 +1142,89 @@ private fun DownloadsTabContent(
     }
     val completedTasks = downloadTasks.filter { it.status == DownloadStatus.COMPLETED }
     val failedTasks = downloadTasks.filter { it.status == DownloadStatus.FAILED }
+    val allGroups = remember(downloadTasks) {
+        downloadTasks.groupBy { inferDownloadSeriesTitle(it.title) }
+    }
+    val activeGroups = remember(activeTasks) {
+        activeTasks.groupBy { inferDownloadSeriesTitle(it.title) }
+    }
+    val completedGroups = remember(completedTasks) {
+        completedTasks.groupBy { inferDownloadSeriesTitle(it.title) }
+    }
+    val failedGroups = remember(failedTasks) {
+        failedTasks.groupBy { inferDownloadSeriesTitle(it.title) }
+    }
+    val selectedGroupTasks = selectedDownloadSeries?.let { allGroups[it].orEmpty() }.orEmpty()
+    val visibleTasks = when (selectedDownloadPage) {
+        1 -> completedTasks
+        2 -> failedTasks
+        else -> activeTasks
+    }
+    val visibleGroups = when (selectedDownloadPage) {
+        1 -> completedGroups
+        2 -> failedGroups
+        else -> activeGroups
+    }
+    val emptyPageText = when (selectedDownloadPage) {
+        1 -> "暂无完成下载"
+        2 -> "暂无失败任务"
+        else -> "暂无正在下载"
+    }
+    LaunchedEffect(selectedDownloadSeries, allGroups) {
+        if (selectedDownloadSeries != null && selectedGroupTasks.isEmpty()) {
+            selectedDownloadSeries = null
+        }
+    }
+    BackHandler(enabled = selectedDownloadSeries != null || selectedDownloadPage != 0) {
+        if (selectedDownloadSeries != null) {
+            selectedDownloadSeries = null
+        } else {
+            selectedDownloadPage = 0
+        }
+    }
+
+    if (selectedDownloadSeries != null) {
+        BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+            val horizontalPadding = remember(maxWidth) { calculateContentHorizontalPadding(maxWidth) }
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(horizontal = horizontalPadding, vertical = 12.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                item {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        TextButton(onClick = { selectedDownloadSeries = null }) {
+                            Text("返回")
+                        }
+                        Text(
+                            selectedDownloadSeries.orEmpty(),
+                            style = MaterialTheme.typography.titleMedium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f)
+                        )
+                        IconButton(onClick = {
+                            selectedGroupTasks.forEach(onDelete)
+                            selectedDownloadSeries = null
+                        }) {
+                            Icon(Icons.Default.Delete, contentDescription = "删除分组")
+                        }
+                    }
+                }
+                items(selectedGroupTasks, key = { it.id }) { task ->
+                    DownloadTaskCard(
+                        task = task,
+                        onPlayInApp = { task -> onPlayInApp(task, selectedGroupTasks) },
+                        onPause = onPause,
+                        onResume = onResume,
+                        onDelete = onDelete,
+                        onOpenFile = onOpenFile
+                    )
+                }
+            }
+        }
+        return
+    }
 
     BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
         val horizontalPadding = remember(maxWidth) { calculateContentHorizontalPadding(maxWidth) }
@@ -1135,57 +1233,141 @@ private fun DownloadsTabContent(
             contentPadding = PaddingValues(horizontal = horizontalPadding, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            if (activeTasks.isNotEmpty()) {
-                item {
-                    Text("正在下载", style = MaterialTheme.typography.titleMedium)
+            item {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FilterChip(
+                        selected = selectedDownloadPage == 0,
+                        onClick = {
+                            selectedDownloadPage = 0
+                            selectedDownloadSeries = null
+                        },
+                        label = { Text("下载中 ${activeTasks.size}") }
+                    )
+                    FilterChip(
+                        selected = selectedDownloadPage == 1,
+                        onClick = {
+                            selectedDownloadPage = 1
+                            selectedDownloadSeries = null
+                        },
+                        label = { Text("已完成 ${completedTasks.size}") }
+                    )
+                    FilterChip(
+                        selected = selectedDownloadPage == 2,
+                        onClick = {
+                            selectedDownloadPage = 2
+                            selectedDownloadSeries = null
+                        },
+                        label = { Text("失败 ${failedTasks.size}") }
+                    )
                 }
-            }
-            items(activeTasks, key = { it.id }) { task ->
-                DownloadTaskCard(
-                    task = task,
-                    onPlayInApp = onPlayInApp,
-                    onPause = onPause,
-                    onResume = onResume,
-                    onDelete = onDelete,
-                    onOpenFile = onOpenFile
-                )
             }
 
-            if (completedTasks.isNotEmpty()) {
+            if (visibleTasks.isEmpty()) {
                 item {
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text("已下载", style = MaterialTheme.typography.titleMedium)
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(180.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(emptyPageText, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
                 }
             }
-            items(completedTasks, key = { it.id }) { task ->
-                DownloadTaskCard(
-                    task = task,
-                    onPlayInApp = onPlayInApp,
-                    onPause = onPause,
-                    onResume = onResume,
-                    onDelete = onDelete,
-                    onOpenFile = onOpenFile
-                )
-            }
-
-            if (failedTasks.isNotEmpty()) {
-                item {
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text("失败任务", style = MaterialTheme.typography.titleMedium)
+            visibleGroups.entries.forEach { (seriesTitle, tasks) ->
+                if (tasks.size > 1) {
+                    item(key = "download_folder_${selectedDownloadPage}_$seriesTitle") {
+                        DownloadSeriesFolderCard(
+                            title = seriesTitle,
+                            count = tasks.size,
+                            summary = buildDownloadSeriesSummary(tasks),
+                            onClick = { selectedDownloadSeries = seriesTitle },
+                            onDelete = { tasks.forEach(onDelete) }
+                        )
+                    }
+                } else {
+                    items(tasks, key = { it.id }) { task ->
+                        DownloadTaskCard(
+                            task = task,
+                            onPlayInApp = { task -> onPlayInApp(task, allGroups[inferDownloadSeriesTitle(task.title)].orEmpty()) },
+                            onPause = onPause,
+                            onResume = onResume,
+                            onDelete = onDelete,
+                            onOpenFile = onOpenFile
+                        )
+                    }
                 }
-            }
-            items(failedTasks, key = { it.id }) { task ->
-                DownloadTaskCard(
-                    task = task,
-                    onPlayInApp = onPlayInApp,
-                    onPause = onPause,
-                    onResume = onResume,
-                    onDelete = onDelete,
-                    onOpenFile = onOpenFile
-                )
             }
         }
     }
+}
+
+@Composable
+private fun DownloadSeriesFolderCard(
+    title: String,
+    count: Int,
+    summary: String,
+    onClick: () -> Unit,
+    onDelete: () -> Unit
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+    ) {
+        Row(
+            modifier = Modifier.padding(12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(Icons.Default.Folder, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+            Spacer(modifier = Modifier.width(12.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(title, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(
+                    "$count 集 · $summary",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            IconButton(onClick = onDelete) {
+                Icon(Icons.Default.Delete, contentDescription = "删除分组")
+            }
+        }
+    }
+}
+
+private fun buildDownloadSeriesSummary(tasks: List<DownloadTaskInfo>): String {
+    val running = tasks.count { it.status == DownloadStatus.RUNNING || it.status == DownloadStatus.QUEUED }
+    val paused = tasks.count { it.status == DownloadStatus.PAUSED }
+    val completed = tasks.count { it.status == DownloadStatus.COMPLETED }
+    val failed = tasks.count { it.status == DownloadStatus.FAILED }
+    return listOfNotNull(
+        running.takeIf { it > 0 }?.let { "下载中 $it" },
+        paused.takeIf { it > 0 }?.let { "暂停 $it" },
+        completed.takeIf { it > 0 }?.let { "完成 $it" },
+        failed.takeIf { it > 0 }?.let { "失败 $it" }
+    ).joinToString("，").ifBlank { "等待中" }
+}
+
+private fun inferDownloadSeriesTitle(title: String): String {
+    val trimmed = title.trim()
+    val series = listOf(" · ", " - ", "_")
+        .firstNotNullOfOrNull { separator ->
+            trimmed.substringBefore(separator).takeIf { it != trimmed }
+        }
+        ?.trim()
+    return series?.takeIf { it.isNotBlank() } ?: trimmed.ifBlank { "已下载视频" }
+}
+
+private fun inferDownloadEpisodeName(title: String): String {
+    val trimmed = title.trim()
+    return listOf(" · ", " - ", "_")
+        .firstNotNullOfOrNull { separator ->
+            trimmed.substringAfter(separator).takeIf { it != trimmed }
+        }
+        ?.trim()
+        ?.takeIf { it.isNotBlank() }
+        ?: trimmed.ifBlank { "播放" }
 }
 
 @Composable

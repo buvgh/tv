@@ -54,12 +54,14 @@ import androidx.media3.ui.PlayerView
 import androidx.media3.common.PlaybackException
 import android.media.AudioManager
 import androidx.compose.ui.platform.LocalDensity
+import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.common.util.Log
 import androidx.media3.ui.AspectRatioFrameLayout
 import com.example.myapplicationlibretv.data.api.NetworkTuning
 import com.example.myapplicationlibretv.download.BackgroundDownloadService
+import com.example.myapplicationlibretv.download.DownloadCenter
 import com.example.myapplicationlibretv.download.parseVideoUrl
 import com.example.myapplicationlibretv.ui.detail.PlayerEpisodePayload
 import java.net.URLDecoder
@@ -109,8 +111,6 @@ fun PlayerScreen(
     var shouldKeepScreenOn by remember { mutableStateOf(false) }
     var currentPositionMs by remember(videoId, displayTitle, videoUrl) { mutableLongStateOf(0L) }
     var durationMs by remember(videoId, displayTitle, videoUrl) { mutableLongStateOf(0L) }
-    var introSkipDismissed by remember(videoId, displayTitle, videoUrl) { mutableStateOf(false) }
-    var outroSkipDismissed by remember(videoId, displayTitle, videoUrl) { mutableStateOf(false) }
 
     val decodedInput = remember(videoUrl) {
         URLDecoder.decode(videoUrl, StandardCharsets.UTF_8.name())
@@ -126,12 +126,13 @@ fun PlayerScreen(
     var reloadToken by remember(decodedInput) { mutableIntStateOf(0) }
     var isAutoSwitching by remember(decodedInput) { mutableStateOf(false) }
     var resumeApplied by remember(videoId, decodedInput) { mutableStateOf(false) }
-    var isDetectingLatency by remember(candidates) { mutableStateOf(candidates.size > 1) }
+    var isDetectingLatency by remember(candidates) { mutableStateOf(false) }
     var candidateMimeTypes by remember(decodedInput) { mutableStateOf<Map<String, String?>>(emptyMap()) }
 
     val parsed = remember(sortedCandidates, currentIndex, reloadToken) {
         parseVideoUrl(sortedCandidates.getOrNull(currentIndex).orEmpty())
     }
+    var playbackReady by remember(parsed.url, reloadToken) { mutableStateOf(false) }
     var detectedMimeType by remember(parsed.url) { mutableStateOf(inferMimeTypeFromUrl(parsed.url)) }
     val isLocalPlayback = remember(parsed.url) {
         parsed.url.startsWith("content://") || parsed.url.startsWith("file://")
@@ -145,39 +146,8 @@ fun PlayerScreen(
     val savedProgress = remember(progressKey) {
         progressPrefs.getLong(progressKey, 0L)
     }
-    val introSkipTargetMs = remember(durationMs) {
-        when {
-            durationMs >= 90 * 60_000L -> 120_000L
-            durationMs >= 45 * 60_000L -> 95_000L
-            durationMs >= 20 * 60_000L -> 75_000L
-            durationMs >= 8 * 60_000L -> 45_000L
-            else -> 0L
-        }
-    }
-    val outroSkipWindowMs = remember(durationMs) {
-        when {
-            durationMs >= 90 * 60_000L -> 180_000L
-            durationMs >= 45 * 60_000L -> 150_000L
-            durationMs >= 20 * 60_000L -> 120_000L
-            durationMs >= 8 * 60_000L -> 75_000L
-            else -> 0L
-        }
-    }
-    val showIntroSkip = remember(currentPositionMs, durationMs, introSkipTargetMs, introSkipDismissed) {
-        !introSkipDismissed &&
-            introSkipTargetMs > 0L &&
-            durationMs > introSkipTargetMs + 60_000L &&
-            currentPositionMs in 3_000L until introSkipTargetMs
-    }
-    val showOutroSkip = remember(currentPositionMs, durationMs, outroSkipWindowMs, outroSkipDismissed, autoPlayNextTriggered) {
-        !outroSkipDismissed &&
-            !autoPlayNextTriggered &&
-            outroSkipWindowMs > 0L &&
-            durationMs > outroSkipWindowMs + 60_000L &&
-            currentPositionMs in (durationMs - outroSkipWindowMs).coerceAtLeast(0L) until (durationMs - 5_000L).coerceAtLeast(0L)
-    }
-
     val proxyServer = remember(context) { LocalProxyServer.getInstance(context) }
+    var useProxyFallback by remember(parsed.url) { mutableStateOf(false) }
     
     // 当资源 ID、线路索引或 URL 变化时，清理代理服务器的临时元数据，防止资源混淆
     LaunchedEffect(videoId, videoUrl, currentIndex) {
@@ -188,14 +158,21 @@ fun PlayerScreen(
         if (candidates.size <= 1) {
             isDetectingLatency = false
             // 即使只有一条线路，也进行预取
-            candidates.firstOrNull()?.let { url ->
+            candidates.firstOrNull()
+                ?.takeUnless { isLocalUri(it) }
+                ?.let { url ->
                 val p = parseVideoUrl(url)
                 proxyServer.prefetch(p.url, NetworkTuning.buildCommonHeaders(p.url, p.headers))
             }
             return@LaunchedEffect
         }
-        isDetectingLatency = true
-        val results = candidates.map { url ->
+        val remoteCandidates = candidates.filterNot(::isLocalUri)
+        if (remoteCandidates.isEmpty()) {
+            isDetectingLatency = false
+            return@LaunchedEffect
+        }
+        isDetectingLatency = false
+        val results = remoteCandidates.map { url ->
             async(Dispatchers.IO) {
                 val probe = probePlayableCandidate(url)
                 Triple(url, probe.mimeType, probe)
@@ -209,7 +186,6 @@ fun PlayerScreen(
                     .thenBy { it.third.latencyMs }
             )
             .map { it.first }
-        sortedCandidates = sorted
         isDetectingLatency = false
         
         // 触发最优线路预载
@@ -223,7 +199,7 @@ fun PlayerScreen(
     LaunchedEffect(parsed.url, parsed.headers) {
         detectedMimeType = candidateMimeTypes[sortedCandidates.getOrNull(currentIndex).orEmpty()]
             ?: inferMimeTypeFromUrl(parsed.url)
-        if (detectedMimeType != null || parsed.url.isBlank()) return@LaunchedEffect
+        if (detectedMimeType != null || parsed.url.isBlank() || isLocalPlayback) return@LaunchedEffect
         detectedMimeType = withContext(Dispatchers.IO) {
             detectMimeTypeFromNetwork(parsed.url, parsed.headers)
         }
@@ -255,10 +231,20 @@ fun PlayerScreen(
         hasAudioTrack = null
         audioInfo = null
         resumeApplied = false
+        playbackReady = false
     }
 
     val audioManager = remember { context.getSystemService(Context.AUDIO_SERVICE) as AudioManager }
+    fun buildDownloadCandidates(): String {
+        val current = sortedCandidates.getOrNull(currentIndex)
+        return (listOfNotNull(current) + sortedCandidates + candidates)
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+            .distinct()
+            .joinToString("\n")
+    }
     DisposableEffect(Unit) {
+        DownloadCenter.setPlaybackActive(true)
         if (!proxyServer.wasStarted) {
             try {
                 proxyServer.start()
@@ -268,6 +254,7 @@ fun PlayerScreen(
             }
         }
         onDispose {
+            DownloadCenter.setPlaybackActive(false)
             // 单例模式下，通常不在这里彻底 shutdown，或者根据需要引用计数
         }
     }
@@ -333,7 +320,7 @@ fun PlayerScreen(
         onDispose {}
     }
 
-    val exoPlayer = remember(parsed, currentIndex, reloadToken, isDetectingLatency) {
+    val exoPlayer = remember(parsed, currentIndex, reloadToken, isDetectingLatency, useProxyFallback) {
         if (isDetectingLatency) return@remember null
         // 允许所有 SSL 证书（解决部分资源站证书问题）
         val trustAllCerts = arrayOf<TrustManager>(object : X509TrustManager {
@@ -348,6 +335,12 @@ fun PlayerScreen(
         javax.net.ssl.HttpsURLConnection.setDefaultHostnameVerifier { _, _ -> true }
 
         val requestProperties = NetworkTuning.buildCommonHeaders(parsed.url, parsed.headers)
+        val canUseProxyFallback = shouldUseLocalProxy(parsed.url, isLocalPlayback)
+        val playbackUrl = if (useProxyFallback && canUseProxyFallback) {
+            proxyServer.getProxyUrl(parsed.url, requestProperties)
+        } else {
+            parsed.url
+        }
 
         val httpDataSourceFactory = DefaultHttpDataSource.Factory()
             .setAllowCrossProtocolRedirects(true)
@@ -355,6 +348,7 @@ fun PlayerScreen(
             .setReadTimeoutMs(20_000)
             .setUserAgent(NetworkTuning.DESKTOP_BROWSER_UA)
             .setDefaultRequestProperties(requestProperties)
+        val dataSourceFactory = DefaultDataSource.Factory(context, httpDataSourceFactory)
 
         val loadControl = DefaultLoadControl.Builder()
             .setBufferDurationsMs(2000, 50000, 1000, 1500)
@@ -362,7 +356,7 @@ fun PlayerScreen(
 
         ExoPlayer.Builder(context)
             .setMediaSourceFactory(
-                DefaultMediaSourceFactory(context).setDataSourceFactory(httpDataSourceFactory)
+                DefaultMediaSourceFactory(context).setDataSourceFactory(dataSourceFactory)
             )
             .setLoadControl(loadControl)
             .build()
@@ -395,10 +389,7 @@ fun PlayerScreen(
                             eventTime: AnalyticsListener.EventTime,
                             audioSinkError: Exception
                         ) {
-                            switchToNextCandidate(
-                                reason = "音频异常，自动尝试下一线路...",
-                                finalReason = "音频异常: ${audioSinkError.localizedMessage ?: "Unknown error"}"
-                            )
+                            audioInfo = "音频异常"
                         }
 
                         override fun onLoadError(
@@ -410,16 +401,13 @@ fun PlayerScreen(
                         ) {
                             if (wasCanceled) return
                             if (mediaLoadData.trackType != C.TRACK_TYPE_AUDIO) return
-                            switchToNextCandidate(
-                                reason = "音频加载失败，自动尝试下一线路...",
-                                finalReason = "音频加载失败: ${error.localizedMessage ?: "网络错误"}"
-                            )
+                            audioInfo = "音频加载中"
                         }
                     }
                 )
                 val isM3u8Stream = detectedMimeType == MimeTypes.APPLICATION_M3U8 ||
                     parsed.url.contains(".m3u8", ignoreCase = true)
-                val mediaItemBuilder = MediaItem.Builder().setUri(parsed.url)
+                val mediaItemBuilder = MediaItem.Builder().setUri(playbackUrl)
                 detectedMimeType?.let { mediaItemBuilder.setMimeType(it) }
                 if (isM3u8Stream && detectedMimeType == null) {
                     mediaItemBuilder.setMimeType(MimeTypes.APPLICATION_M3U8)
@@ -431,6 +419,12 @@ fun PlayerScreen(
                 addListener(object : Player.Listener {
                     override fun onPlayerError(error: PlaybackException) {
                         Log.e("PlayerScreen", "Playback Error: ${error.errorCodeName}(${error.errorCode})", error)
+                        if (canUseProxyFallback && !useProxyFallback) {
+                            errorMessage = "当前线路直连失败，正在尝试兼容播放..."
+                            useProxyFallback = true
+                            reloadToken += 1
+                            return
+                        }
                         switchToNextCandidate(
                             reason = "线路${currentIndex + 1}播放失败，自动尝试下一线路...",
                             finalReason = "当前资源无法播放: ${error.localizedMessage ?: "网络错误"}"
@@ -439,6 +433,7 @@ fun PlayerScreen(
 
                     override fun onPlaybackStateChanged(playbackState: Int) {
                         if (playbackState == Player.STATE_READY) {
+                            playbackReady = true
                             isAutoSwitching = false
                             playerViewRef?.showController()
                             shouldKeepScreenOn = this@apply.playWhenReady
@@ -460,7 +455,6 @@ fun PlayerScreen(
                             autoPlayNextTriggered = false
                         } else if (
                             playbackState == Player.STATE_ENDED &&
-                            !isLocalPlayback &&
                             !autoPlayNextTriggered
                         ) {
                             shouldKeepScreenOn = false
@@ -516,12 +510,12 @@ fun PlayerScreen(
         }
     )
 
-        val controllerPlayer = remember(exoPlayer, nextEpisode, currentEpisodeIndex, isLocalPlayback) {
+        val controllerPlayer = remember(exoPlayer, nextEpisode, currentEpisodeIndex) {
         val p = exoPlayer ?: return@remember null
         object : ForwardingPlayer(p) {
             override fun getAvailableCommands(): Player.Commands {
                 val builder = super.getAvailableCommands().buildUpon()
-                if (!isLocalPlayback && nextEpisode != null) {
+                if (nextEpisode != null) {
                     builder.add(COMMAND_SEEK_TO_NEXT_MEDIA_ITEM)
                     builder.add(COMMAND_SEEK_TO_NEXT)
                 } else {
@@ -541,10 +535,10 @@ fun PlayerScreen(
                 seekToNextMediaItem()
             }
 
-            override fun hasNextMediaItem(): Boolean = !isLocalPlayback && nextEpisode != null
+            override fun hasNextMediaItem(): Boolean = nextEpisode != null
 
             override fun getNextMediaItemIndex(): Int {
-                return if (!isLocalPlayback && nextEpisode != null) currentEpisodeIndex + 1 else C.INDEX_UNSET
+                return if (nextEpisode != null) currentEpisodeIndex + 1 else C.INDEX_UNSET
             }
         }
     }
@@ -558,7 +552,7 @@ fun PlayerScreen(
         
         if (btnId == 0) return
         val nextButton = playerView.findViewById<ImageButton?>(btnId) ?: return
-        val enabled = !isLocalPlayback && nextEpisode != null
+        val enabled = nextEpisode != null
         nextButton.visibility = if (enabled) View.VISIBLE else View.GONE
         nextButton.isEnabled = enabled
         nextButton.isClickable = enabled
@@ -615,26 +609,11 @@ fun PlayerScreen(
         exoPlayer?.volume = volume.coerceIn(0f, 1f)
     }
 
-    LaunchedEffect(exoPlayer, hasAudioTrack) {
-        if (hasAudioTrack == false && exoPlayer != null) {
-            delay(2500)
-            if (hasAudioTrack == false) {
-                switchToNextCandidate(
-                    reason = "无音轨，自动尝试下一线路...",
-                    finalReason = "当前线路无可用音轨"
-                )
-            }
-        }
-    }
-
     LaunchedEffect(exoPlayer, currentIndex, reloadToken) {
         if (exoPlayer == null) return@LaunchedEffect
-        delay(12_000)
+        delay(45_000)
         if (exoPlayer.playbackState != Player.STATE_READY && exoPlayer.playbackState != Player.STATE_ENDED) {
-            switchToNextCandidate(
-                reason = "线路连接超时，自动尝试下一线路...",
-                finalReason = "当前资源加载超时"
-            )
+            errorMessage = "当前线路加载较慢，可稍等或手动重试"
         }
     }
 
@@ -881,7 +860,7 @@ fun PlayerScreen(
                                         }
                                         BackgroundDownloadService.start(
                                             context = context,
-                                            rawUrl = candidates.getOrNull(currentIndex).orEmpty(),
+                                            rawUrl = buildDownloadCandidates(),
                                             title = displayTitle.ifBlank { null }
                                         )
                                         toastMessage = if (url.contains(".m3u8", ignoreCase = true)) {
@@ -993,7 +972,7 @@ fun PlayerScreen(
                                     }
                                     BackgroundDownloadService.start(
                                         context = context,
-                                        rawUrl = candidates.getOrNull(currentIndex).orEmpty(),
+                                        rawUrl = buildDownloadCandidates(),
                                         title = displayTitle.ifBlank { null }
                                     )
                                     toastMessage = if (url.contains(".m3u8", ignoreCase = true)) {
@@ -1062,51 +1041,6 @@ fun PlayerScreen(
         }
         if (showVolumeOverlay) {
             OverlayIndicator(label = "音量", value = volume, modifier = Modifier.align(Alignment.CenterEnd))
-        }
-
-        if (showIntroSkip || showOutroSkip) {
-            Surface(
-                modifier = Modifier
-                    .align(Alignment.BottomEnd)
-                    .padding(end = 16.dp, bottom = 96.dp),
-                shape = MaterialTheme.shapes.large,
-                color = Color.Black.copy(alpha = 0.72f)
-            ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    val label = if (showIntroSkip) "跳过片头" else "跳过片尾"
-                    TextButton(
-                        onClick = {
-                            if (showIntroSkip) {
-                                exoPlayer?.seekTo(introSkipTargetMs)
-                                introSkipDismissed = true
-                                toastMessage = "已跳过片头"
-                            } else {
-                                val target = (durationMs - 1_500L).coerceAtLeast(currentPositionMs)
-                                exoPlayer?.seekTo(target)
-                                outroSkipDismissed = true
-                                toastMessage = "已跳过片尾"
-                            }
-                            playerViewRef?.showController()
-                        }
-                    ) {
-                        Text(label, color = Color.White)
-                    }
-                    TextButton(
-                        onClick = {
-                            if (showIntroSkip) {
-                                introSkipDismissed = true
-                            } else {
-                                outroSkipDismissed = true
-                            }
-                        }
-                    ) {
-                        Text("关闭", color = Color.White.copy(alpha = 0.88f))
-                    }
-                }
-            }
         }
 
         errorMessage?.let { msg ->
@@ -1247,6 +1181,11 @@ private fun shouldUseLocalProxy(url: String, isLocalPlayback: Boolean): Boolean 
         lower.contains(".mov") ||
         lower.contains(".flv") ||
         lower.contains(".ts")
+}
+
+private fun isLocalUri(url: String): Boolean {
+    val trimmed = url.trim()
+    return trimmed.startsWith("content://") || trimmed.startsWith("file://")
 }
 
 private fun inferMimeTypeFromUrl(url: String): String? {

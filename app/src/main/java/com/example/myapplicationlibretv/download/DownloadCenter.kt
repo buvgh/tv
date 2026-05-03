@@ -18,6 +18,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import java.io.File
+import java.util.concurrent.ConcurrentHashMap
 
 enum class DownloadStatus {
     QUEUED,
@@ -47,6 +48,16 @@ object DownloadCenter {
     private var appContext: Context? = null
     private var observeJob: Job? = null
     private var importedLegacy = false
+    @Volatile
+    private var playbackActive = false
+    private val lastProgressWrites = ConcurrentHashMap<String, Long>()
+    private val lastProgressTexts = ConcurrentHashMap<String, String>()
+
+    fun setPlaybackActive(active: Boolean) {
+        playbackActive = active
+    }
+
+    fun isPlaybackActive(): Boolean = playbackActive
 
     fun initialize(context: Context) {
         val targetContext = context.applicationContext
@@ -89,12 +100,26 @@ object DownloadCenter {
         val dao = AppDatabase.getDatabase(context.applicationContext).videoDao()
         scope.launch {
             val current = dao.getDownloadById(id) ?: return@launch
+            val now = System.currentTimeMillis()
+            val previousText = lastProgressTexts[id]
+            val previousWriteAt = lastProgressWrites[id] ?: 0L
+            val importantChange = current.status != DownloadStatus.RUNNING.name ||
+                progressText.startsWith("当前线路") ||
+                progressText.startsWith("续传中")
+            if (!importantChange && previousText == progressText && now - previousWriteAt < 1200L) {
+                return@launch
+            }
+            if (!importantChange && now - previousWriteAt < 900L) {
+                return@launch
+            }
+            lastProgressTexts[id] = progressText
+            lastProgressWrites[id] = now
             dao.insertDownload(
                 current.copy(
                     status = DownloadStatus.RUNNING.name,
                     progressText = progressText,
                     errorMessage = null,
-                    updatedAt = System.currentTimeMillis()
+                    updatedAt = now
                 )
             )
         }
@@ -119,6 +144,8 @@ object DownloadCenter {
         initialize(context)
         val dao = AppDatabase.getDatabase(context.applicationContext).videoDao()
         scope.launch {
+            lastProgressWrites.remove(id)
+            lastProgressTexts.remove(id)
             val current = dao.getDownloadById(id) ?: return@launch
             val resolvedTitle = chooseDisplayTitle(current.title, fileName)
             dao.insertDownload(
@@ -139,6 +166,8 @@ object DownloadCenter {
         initialize(context)
         val dao = AppDatabase.getDatabase(context.applicationContext).videoDao()
         scope.launch {
+            lastProgressWrites.remove(id)
+            lastProgressTexts.remove(id)
             val current = dao.getDownloadById(id) ?: return@launch
             dao.insertDownload(
                 current.copy(
@@ -156,9 +185,11 @@ object DownloadCenter {
         val targetContext = context.applicationContext
         val dao = AppDatabase.getDatabase(targetContext).videoDao()
         scope.launch {
+            lastProgressWrites.remove(id)
+            lastProgressTexts.remove(id)
             val current = dao.getDownloadById(id)
             if (current != null && removeFile) {
-                deleteFile(targetContext, current.fileUri)
+                deleteFile(targetContext, current.fileUri, current.fileName, current.title)
             }
             dao.deleteDownload(id)
         }
@@ -250,15 +281,86 @@ object DownloadCenter {
         }
     }
 
-    private fun deleteFile(context: Context, fileUri: String?) {
-        if (fileUri.isNullOrBlank()) return
+    private fun deleteFile(context: Context, fileUri: String?, fileName: String?, title: String) {
+        var deleted = false
+        if (!fileUri.isNullOrBlank()) {
+            deleted = runCatching {
+                val uri = Uri.parse(fileUri)
+                when (uri.scheme) {
+                    "content" -> context.contentResolver.delete(uri, null, null) > 0
+                    "file" -> File(requireNotNull(uri.path)).delete()
+                    else -> false
+                }
+            }.getOrDefault(false)
+        }
+        if (!deleted) {
+            deleted = deleteFromMediaStoreByName(context, fileName)
+        }
+        if (!deleted) {
+            deleteFromLocalDownloadsByName(context, fileName, title)
+        }
+    }
+
+    private fun deleteFromMediaStoreByName(context: Context, fileName: String?): Boolean {
+        if (fileName.isNullOrBlank() || Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return false
+        val projection = arrayOf(MediaStore.Downloads._ID, MediaStore.Downloads.DISPLAY_NAME)
+        val selection = "${MediaStore.Downloads.DISPLAY_NAME} = ?"
+        var deleted = false
         runCatching {
-            val uri = Uri.parse(fileUri)
-            when (uri.scheme) {
-                "content" -> context.contentResolver.delete(uri, null, null)
-                "file" -> File(requireNotNull(uri.path)).delete()
+            context.contentResolver.query(
+                MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+                projection,
+                selection,
+                arrayOf(fileName),
+                null
+            )?.use { cursor ->
+                val idIndex = cursor.getColumnIndexOrThrow(MediaStore.Downloads._ID)
+                while (cursor.moveToNext()) {
+                    val uri = ContentUris.withAppendedId(
+                        MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+                        cursor.getLong(idIndex)
+                    )
+                    deleted = context.contentResolver.delete(uri, null, null) > 0 || deleted
+                }
             }
         }
+        return deleted
+    }
+
+    private fun deleteFromLocalDownloadsByName(context: Context, fileName: String?, title: String) {
+        if (fileName.isNullOrBlank()) return
+        val seriesTitle = inferSeriesTitle(title)
+        val baseDirs = listOfNotNull(
+            context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS),
+            File(context.filesDir, "downloads").takeIf { it.exists() }
+        )
+        val candidateDirs = baseDirs.flatMap { base ->
+            listOfNotNull(
+                base,
+                File(base, "枫林晚TV"),
+                seriesTitle?.let { File(File(base, "枫林晚TV"), sanitizeFileNameForPath(it)) },
+                seriesTitle?.let { File(base, sanitizeFileNameForPath(it)) }
+            )
+        }
+        candidateDirs.forEach { dir ->
+            runCatching {
+                File(dir, fileName).takeIf { it.exists() }?.delete()
+            }
+        }
+    }
+
+    private fun inferSeriesTitle(title: String): String? {
+        val trimmed = title.trim()
+        return listOf(" · ", " - ", "_")
+            .firstNotNullOfOrNull { separator ->
+                trimmed.substringBefore(separator).takeIf { it != trimmed }
+            }
+            ?.trim()
+            ?.takeIf { it.isNotBlank() }
+    }
+
+    private fun sanitizeFileNameForPath(name: String): String {
+        return name.replace(Regex("[^a-zA-Z0-9._\\-\\u4e00-\\u9fa5]"), "_")
     }
 
     private fun isVideoFile(name: String): Boolean {
@@ -292,7 +394,7 @@ object DownloadCenter {
         return DownloadTaskInfo(
             id = taskId,
             title = title,
-            status = DownloadStatus.valueOf(status),
+            status = runCatching { DownloadStatus.valueOf(status) }.getOrDefault(DownloadStatus.FAILED),
             progressText = progressText,
             rawUrl = rawUrl,
             fileName = fileName,

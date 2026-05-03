@@ -38,14 +38,14 @@ object NetworkTuning {
     ): OkHttpClient {
         val dispatcher = Dispatcher().apply {
             maxRequests = 64
-            maxRequestsPerHost = 16
+            maxRequestsPerHost = 24
         }
         val builder = OkHttpClient.Builder()
             .dispatcher(dispatcher)
             .connectTimeout(5, TimeUnit.SECONDS)
             .readTimeout(8, TimeUnit.SECONDS)
             .writeTimeout(10, TimeUnit.SECONDS)
-            .callTimeout(12, TimeUnit.SECONDS)
+            .callTimeout(0, TimeUnit.SECONDS)
             .retryOnConnectionFailure(true)
             .dns(AdaptiveDns())
             .proxySelector(ProxySelector.getDefault())

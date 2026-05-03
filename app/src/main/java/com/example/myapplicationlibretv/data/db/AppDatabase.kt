@@ -57,7 +57,7 @@ interface VideoDao {
         timestamp: Long = System.currentTimeMillis()
     )
 
-    @Query("SELECT * FROM downloads ORDER BY updatedAt DESC")
+    @Query("SELECT * FROM downloads ORDER BY createdAt DESC")
     fun getDownloads(): Flow<List<DownloadVideo>>
 
     @Query("SELECT * FROM downloads WHERE taskId = :taskId LIMIT 1")

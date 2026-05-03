@@ -40,7 +40,7 @@ class LocalProxyServer(private val context: Context, private val port: Int = 888
     private val client = NetworkTuning.createTunedClient(trustAllSsl = true)
     private val cacheDir = File(context.cacheDir, "proxy_cache").apply { if (!exists()) mkdirs() }
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-    private val semaphore = Semaphore(4)
+    private val semaphore = Semaphore(6)
     private val downloadingJobs = ConcurrentHashMap<String, Job>()
     private val playlistSegments = ConcurrentHashMap<String, List<String>>()
     private val tsToPlaylistMap = ConcurrentHashMap<String, String>()
@@ -54,7 +54,7 @@ class LocalProxyServer(private val context: Context, private val port: Int = 888
     private val directChunkSize = 2L * 1024L * 1024L
     private val directPrefetchParallelism = 4
     private val directPrefetchMinSize = 8L * 1024L * 1024L
-    private val directPrefetchChunks = 12
+    private val directPrefetchChunks = 6
 
     private inner class SharedDownload(val url: String, val file: File, val headers: Map<String, String>) {
         private val listeners = CopyOnWriteArrayList<java.io.PipedOutputStream>()
@@ -166,7 +166,7 @@ class LocalProxyServer(private val context: Context, private val port: Int = 888
         return when {
             originalUrl.contains(".m3u8", ignoreCase = true) -> handleM3u8(originalUrl, headers)
             tsToPlaylistMap.containsKey(originalUrl) || originalUrl.endsWith(".ts", ignoreCase = true) ->
-                handleTs(originalUrl, headers)
+                handleSegment(originalUrl, headers)
             else -> handleDirectMedia(originalUrl, headers, session.headers)
         }
     }
@@ -179,30 +179,34 @@ class LocalProxyServer(private val context: Context, private val port: Int = 888
                 if (shouldForwardHeader(k)) requestBuilder.header(k, v)
             }
             val body = client.newCall(requestBuilder.build()).execute().use { response ->
+                if (!response.isSuccessful) throw IOException("Unexpected code $response")
                 response.body?.string().orEmpty()
             }
 
             val baseUrl = originalUrl.substringBeforeLast("/", originalUrl)
-            val tsList = mutableListOf<String>()
+            val mediaList = mutableListOf<String>()
             val rewritten = body.lines().joinToString("\n") { line ->
                 val trimmed = line.trim()
-                if (trimmed.isBlank() || trimmed.startsWith("#")) {
-                    line
-                } else {
-                    val absoluteUrl = resolveUrl(baseUrl, trimmed)
-                    tsList += absoluteUrl
-                    tsToPlaylistMap[absoluteUrl] = originalUrl
-                    upstreamHeaders[absoluteUrl] = headers
-                    val encoded = Base64.encodeToString(
-                        absoluteUrl.toByteArray(),
-                        Base64.URL_SAFE or Base64.NO_WRAP
-                    )
-                    "http://127.0.0.1:$port/proxy?url=$encoded"
+                when {
+                    trimmed.isBlank() -> line
+                    trimmed.startsWith("#EXT-X-KEY", ignoreCase = true) ||
+                        trimmed.startsWith("#EXT-X-MAP", ignoreCase = true) -> {
+                        rewriteUriAttributes(line, baseUrl, headers)
+                    }
+                    trimmed.startsWith("#") -> line
+                    else -> {
+                        val absoluteUrl = resolveUrl(baseUrl, trimmed)
+                        mediaList += absoluteUrl
+                        tsToPlaylistMap[absoluteUrl] = originalUrl
+                        upstreamHeaders[absoluteUrl] = headers
+                        proxyUrlFor(absoluteUrl)
+                    }
                 }
             }
 
-            playlistSegments[originalUrl] = tsList
-            tsList.take(8).forEach { preloadTs(it, headers) }
+            val preloadableSegments = mediaList.filterNot { it.contains(".m3u8", ignoreCase = true) }
+            playlistSegments[originalUrl] = preloadableSegments
+            preloadableSegments.take(8).forEach { preloadSegment(it, headers) }
             newFixedLengthResponse(Response.Status.OK, "application/vnd.apple.mpegurl", rewritten)
         } catch (e: Exception) {
             Log.e("LocalProxyServer", "Error handling M3U8", e)
@@ -210,19 +214,19 @@ class LocalProxyServer(private val context: Context, private val port: Int = 888
         }
     }
 
-    private fun handleTs(tsUrl: String, headers: Map<String, String>): Response {
-        val cacheFile = File(cacheDir, md5(tsUrl))
+    private fun handleSegment(segmentUrl: String, headers: Map<String, String>): Response {
+        val cacheFile = File(cacheDir, md5(segmentUrl))
         if (cacheFile.exists() && cacheFile.length() > 0) {
             cacheFile.setLastModified(System.currentTimeMillis())
-            triggerSlidingWindowPreload(tsUrl, headers)
-            return newChunkedResponse(Response.Status.OK, "video/mp2t", FileInputStream(cacheFile))
+            triggerSlidingWindowPreload(segmentUrl, headers)
+            return newChunkedResponse(Response.Status.OK, detectMimeType(segmentUrl), FileInputStream(cacheFile))
         }
 
-        val download = activeDownloads.getOrPut(tsUrl) {
-            SharedDownload(tsUrl, cacheFile, headers).also { it.start() }
+        val download = activeDownloads.getOrPut(segmentUrl) {
+            SharedDownload(segmentUrl, cacheFile, headers).also { it.start() }
         }
-        triggerSlidingWindowPreload(tsUrl, headers)
-        return newChunkedResponse(Response.Status.OK, "video/mp2t", download.createInputStream())
+        triggerSlidingWindowPreload(segmentUrl, headers)
+        return newChunkedResponse(Response.Status.OK, detectMimeType(segmentUrl), download.createInputStream())
     }
 
     private fun handleDirectMedia(
@@ -284,7 +288,7 @@ class LocalProxyServer(private val context: Context, private val port: Int = 888
         val index = segments.indexOf(tsUrl)
         if (index == -1) return
         repeat(10) { offset ->
-            segments.getOrNull(index + offset + 1)?.let { preloadTs(it, headers) }
+            segments.getOrNull(index + offset + 1)?.let { preloadSegment(it, headers) }
         }
     }
 
@@ -298,7 +302,7 @@ class LocalProxyServer(private val context: Context, private val port: Int = 888
         download.error?.let { throw it }
     }
 
-    private fun preloadTs(url: String, headers: Map<String, String>) {
+    private fun preloadSegment(url: String, headers: Map<String, String>) {
         val file = File(cacheDir, md5(url))
         if (file.exists()) {
             file.setLastModified(System.currentTimeMillis())
@@ -361,23 +365,7 @@ class LocalProxyServer(private val context: Context, private val port: Int = 888
         val job = scope.launch {
             semaphore.acquire()
             try {
-                val start = index * state.chunkSize
-                val end = (start + expected - 1).coerceAtLeast(start)
-                val requestBuilder = Request.Builder().url(state.url)
-                state.headers.forEach { (k, v) ->
-                    if (shouldForwardHeader(k)) requestBuilder.header(k, v)
-                }
-                requestBuilder.header("Range", "bytes=$start-$end")
-                client.newCall(requestBuilder.build()).execute().use { response ->
-                    if (response.code !in listOf(200, 206)) {
-                        throw IOException("Unexpected code ${response.code}")
-                    }
-                    val body = response.body ?: throw IOException("Empty body")
-                    FileOutputStream(chunkFile, false).use { output ->
-                        body.byteStream().use { input -> input.copyTo(output) }
-                    }
-                }
-                chunkFile.setLastModified(System.currentTimeMillis())
+                downloadDirectChunk(state, index)
                 evictCacheIfNeeded()
             } catch (_: Exception) {
             } finally {
@@ -386,6 +374,34 @@ class LocalProxyServer(private val context: Context, private val port: Int = 888
             }
         }
         downloadingJobs[key] = job
+    }
+
+    private fun downloadDirectChunk(state: DirectPrefetchState, index: Int) {
+        val expected = state.expectedSize(index)
+        val chunkFile = state.chunkFiles[index]
+        if (expected <= 0L) return
+        if (chunkFile.exists() && chunkFile.length() >= expected) {
+            chunkFile.setLastModified(System.currentTimeMillis())
+            return
+        }
+
+        val start = index * state.chunkSize
+        val end = (start + expected - 1).coerceAtLeast(start)
+        val requestBuilder = Request.Builder().url(state.url)
+        state.headers.forEach { (k, v) ->
+            if (shouldForwardHeader(k)) requestBuilder.header(k, v)
+        }
+        requestBuilder.header("Range", "bytes=$start-$end")
+        client.newCall(requestBuilder.build()).execute().use { response ->
+            if (response.code !in listOf(200, 206)) {
+                throw IOException("Unexpected code ${response.code}")
+            }
+            val body = response.body ?: throw IOException("Empty body")
+            FileOutputStream(chunkFile, false).use { output ->
+                body.byteStream().use { input -> input.copyTo(output) }
+            }
+        }
+        chunkFile.setLastModified(System.currentTimeMillis())
     }
 
     private inner class DirectPrefetchInputStream(
@@ -434,7 +450,10 @@ class LocalProxyServer(private val context: Context, private val port: Int = 888
         private fun openChunkInput(index: Int): InputStream? {
             val chunkFile = state.chunkFiles.getOrNull(index) ?: return null
             val expected = state.expectedSize(index)
-            val deadline = System.currentTimeMillis() + 20_000L
+            if (!chunkFile.exists() || chunkFile.length() < expected) {
+                runCatching { downloadDirectChunk(state, index) }
+            }
+            val deadline = System.currentTimeMillis() + 8_000L
             while ((!chunkFile.exists() || chunkFile.length() < expected) && System.currentTimeMillis() < deadline) {
                 Thread.sleep(60)
             }
@@ -545,15 +564,38 @@ class LocalProxyServer(private val context: Context, private val port: Int = 888
         return digest.digest().joinToString("") { "%02x".format(it) }
     }
 
-    fun getProxyUrl(originalUrl: String, headers: Map<String, String> = emptyMap()): String {
-        if (headers.isNotEmpty()) {
-            upstreamHeaders[originalUrl] = headers
-        }
+    private fun proxyUrlFor(originalUrl: String): String {
         val encoded = Base64.encodeToString(
             originalUrl.toByteArray(),
             Base64.URL_SAFE or Base64.NO_WRAP
         )
         return "http://127.0.0.1:$port/proxy?url=$encoded"
+    }
+
+    private fun rewriteUriAttributes(line: String, baseUrl: String, headers: Map<String, String>): String {
+        return Regex("""URI="([^"]+)"""").replace(line) { match ->
+            val rawUri = match.groupValues[1]
+            if (!isProxyablePlaylistUri(rawUri)) return@replace match.value
+            val absoluteUrl = resolveUrl(baseUrl, rawUri)
+            upstreamHeaders[absoluteUrl] = headers
+            "URI=\"${proxyUrlFor(absoluteUrl)}\""
+        }
+    }
+
+    private fun isProxyablePlaylistUri(uri: String): Boolean {
+        val lower = uri.trim().lowercase()
+        if (lower.isBlank()) return false
+        return !lower.startsWith("data:") &&
+            !lower.startsWith("skd:") &&
+            !lower.startsWith("urn:") &&
+            !lower.startsWith("blob:")
+    }
+
+    fun getProxyUrl(originalUrl: String, headers: Map<String, String> = emptyMap()): String {
+        if (headers.isNotEmpty()) {
+            upstreamHeaders[originalUrl] = headers
+        }
+        return proxyUrlFor(originalUrl)
     }
 
     fun prefetch(originalUrl: String, headers: Map<String, String>) {
@@ -572,14 +614,17 @@ class LocalProxyServer(private val context: Context, private val port: Int = 888
                             .filter { it.isNotBlank() && !it.startsWith("#") }
                             .map { resolveUrl(baseUrl, it.trim()) }
                         playlistSegments[originalUrl] = tsList
-                        tsList.take(5).forEach { tsUrl ->
-                            tsToPlaylistMap[tsUrl] = originalUrl
-                            upstreamHeaders[tsUrl] = headers
-                            preloadTs(tsUrl, headers)
+                        tsList
+                            .filterNot { it.contains(".m3u8", ignoreCase = true) }
+                            .take(5)
+                            .forEach { segmentUrl ->
+                                tsToPlaylistMap[segmentUrl] = originalUrl
+                                upstreamHeaders[segmentUrl] = headers
+                                preloadSegment(segmentUrl, headers)
                         }
                     }
                 } else {
-                    prepareDirectPrefetch(originalUrl, headers) ?: preloadTs(originalUrl, headers)
+                    prepareDirectPrefetch(originalUrl, headers)
                 }
                 Log.i("LocalProxyServer", "Prefetch triggered for: $originalUrl")
             } catch (e: Exception) {
@@ -625,6 +670,10 @@ class LocalProxyServer(private val context: Context, private val port: Int = 888
             lower.contains(".flv") -> "video/x-flv"
             lower.contains(".m3u8") -> "application/vnd.apple.mpegurl"
             lower.contains(".ts") -> "video/mp2t"
+            lower.contains(".m4s") -> "video/iso.segment"
+            lower.contains(".m4v") -> "video/x-m4v"
+            lower.contains(".aac") -> "audio/aac"
+            lower.contains(".key") -> "application/octet-stream"
             else -> "video/*"
         }
     }

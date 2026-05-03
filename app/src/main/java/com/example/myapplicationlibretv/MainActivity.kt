@@ -73,10 +73,16 @@ fun AppNavigation(
                     val encodedTitle = URLEncoder.encode(videoTitle, StandardCharsets.UTF_8.toString())
                     navController.navigate("detail/$encodedSiteKey/$videoId/$encodedTitle")
                 },
-                onDownloadedVideoClick = { title, fileUri ->
+                onDownloadedVideoClick = { title, fileUri, episodes, currentEpisodeIndex ->
                     val encodedTitle = URLEncoder.encode(title, StandardCharsets.UTF_8.toString())
                     val encodedUri = URLEncoder.encode(fileUri, StandardCharsets.UTF_8.toString())
-                    navController.navigate("player/0/$encodedTitle/$encodedUri?session=")
+                    val sessionId = PlayerSessionStore.put(
+                        PlayerSession(
+                            episodes = episodes,
+                            currentEpisodeIndex = currentEpisodeIndex
+                        )
+                    )
+                    navController.navigate("player/0/$encodedTitle/$encodedUri?session=$sessionId")
                 }
             )
         }
