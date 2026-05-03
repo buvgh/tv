@@ -20,7 +20,8 @@ suspend fun fetchCmsResponse(
     typeId: Int? = null,
     page: Int = 1,
     keyword: String? = null,
-    ids: String? = null
+    ids: String? = null,
+    extraQueryParams: Map<String, String> = emptyMap()
 ): CmsResponse {
     val requestUrl = buildCmsRequestUrl(
         baseUrl = baseUrl,
@@ -28,7 +29,8 @@ suspend fun fetchCmsResponse(
         typeId = typeId,
         page = page,
         keyword = keyword,
-        ids = ids
+        ids = ids,
+        extraQueryParams = extraQueryParams
     )
     val text = RetrofitClient.cmsApi.getRaw(requestUrl).string()
     return parseCmsResponse(text)
@@ -40,7 +42,8 @@ fun buildCmsRequestUrl(
     typeId: Int? = null,
     page: Int = 1,
     keyword: String? = null,
-    ids: String? = null
+    ids: String? = null,
+    extraQueryParams: Map<String, String> = emptyMap()
 ): String {
     val normalizedBase = baseUrl.trim()
     val uri = Uri.parse(normalizedBase)
@@ -72,6 +75,11 @@ fun buildCmsRequestUrl(
     }
     if (!ids.isNullOrBlank()) {
         builder.appendQueryParameter("ids", ids)
+    }
+    extraQueryParams.forEach { (key, value) ->
+        if (key.isNotBlank() && value.isNotBlank() && uri.getQueryParameter(key).isNullOrBlank()) {
+            builder.appendQueryParameter(key, value)
+        }
     }
     return builder.build().toString()
 }

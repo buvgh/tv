@@ -74,6 +74,7 @@ class HomeViewModel(application: android.app.Application) : androidx.lifecycle.A
         private const val PERSON_SEARCH_FALLBACK_SITES = 36
         private const val PERSON_SEARCH_FALLBACK_PAGES = 10
         private const val PERSON_SEARCH_DETAIL_ENRICH_LIMIT = 160
+        private const val PERSON_FIELD_SEARCH_SITES = 32
     }
 
     private val videoDao = AppDatabase.getDatabase(application).videoDao()
@@ -367,6 +368,15 @@ class HomeViewModel(application: android.app.Application) : androidx.lifecycle.A
                         enrichLimit = if (personSearchMode) PERSON_SEARCH_DETAIL_ENRICH_LIMIT else SEARCH_DETAIL_ENRICH_LIMIT
                     )
                     merged = (merged + fallbackCandidates)
+                        .distinctBy { "${it.siteKey}:${it.video.id}" }
+                }
+
+                if (personSearchMode && merged.size < 30) {
+                    val personFieldCandidates = fetchPersonFieldSearchResults(
+                        personName = keyword,
+                        sites = sitesSnapshot.take(PERSON_FIELD_SEARCH_SITES)
+                    )
+                    merged = (merged + personFieldCandidates)
                         .distinctBy { "${it.siteKey}:${it.video.id}" }
                 }
 
@@ -838,6 +848,52 @@ class HomeViewModel(application: android.app.Application) : androidx.lifecycle.A
             titles.any { title -> normalizedName == normalizeVideoName(title) }
         }
         return (creditMatched + titleMatched + filmographyMatched)
+            .distinctBy { "${it.siteKey}:${it.video.id}" }
+            .take(120)
+    }
+
+    private suspend fun fetchPersonFieldSearchResults(
+        personName: String,
+        sites: List<Site>
+    ): List<SourcedVideo> {
+        val keyword = personName.trim()
+        if (keyword.isBlank() || sites.isEmpty()) return emptyList()
+
+        val limiter = Semaphore(FETCH_CONCURRENCY)
+        val searchParams = listOf("actor", "director", "vod_actor", "vod_director")
+        val rawCandidates = supervisorScope {
+            sites.flatMap { site ->
+                searchParams.map { param ->
+                    async {
+                        limiter.withPermit {
+                            withTimeoutOrNull(PERSON_SEARCH_REQUEST_TIMEOUT_MS) {
+                                runCatching {
+                                    fetchCmsResponse(
+                                        baseUrl = site.api,
+                                        action = "detail",
+                                        extraQueryParams = mapOf(param to keyword)
+                                    ).list.map { video ->
+                                        SourcedVideo(
+                                            siteKey = site.key ?: site.api,
+                                            siteName = site.name,
+                                            siteApi = site.api,
+                                            video = video
+                                        )
+                                    }
+                                }.getOrDefault(emptyList())
+                            }.orEmpty()
+                        }
+                    }
+                }
+            }.map { it.await() }.flatten()
+        }
+
+        val enrichedCandidates = enrichSearchCandidates(
+            candidates = rawCandidates,
+            enrichLimit = PERSON_SEARCH_DETAIL_ENRICH_LIMIT
+        )
+        return applyContentFilter(enrichedCandidates)
+            .filter { matchesPersonInCredits(keyword, it.video) }
             .distinctBy { "${it.siteKey}:${it.video.id}" }
             .take(120)
     }
