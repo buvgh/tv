@@ -59,9 +59,10 @@ import java.util.LinkedHashMap
 
 class DetailViewModel(context: android.app.Application) : androidx.lifecycle.AndroidViewModel(context) {
     companion object {
-        private const val DETAIL_FETCH_TIMEOUT_MS = 3_500L
+        private const val DETAIL_FETCH_TIMEOUT_MS = 2_200L
+        private const val DETAIL_BACKGROUND_TIMEOUT_MS = 2_600L
         private const val DETAIL_FETCH_CONCURRENCY = 6
-        private const val MAX_DETAIL_SITES = 12
+        private const val MAX_DETAIL_SITES = 14
     }
 
     private val videoDao = AppDatabase.getDatabase(context).videoDao()
@@ -118,47 +119,53 @@ class DetailViewModel(context: android.app.Application) : androidx.lifecycle.And
                     addAll(sites.filter { site -> site.api != preferredSite?.api }.take(MAX_DETAIL_SITES - size))
                 }
                 val limiter = Semaphore(DETAIL_FETCH_CONCURRENCY)
-                val detailResults = supervisorScope {
-                    buildList {
-                        preferredSite?.let { site ->
-                            add(async {
-                                limiter.withPermit {
-                                    withTimeoutOrNull(DETAIL_FETCH_TIMEOUT_MS) {
-                                        fetchDetailFromPreferredSite(site, id, videoTitle)
-                                    }
-                                }
-                            })
-                        }
-                        candidateSites.filter { site -> site.api != preferredSite?.api }
-                            .forEach { site ->
-                                add(async {
-                                    limiter.withPermit {
-                                        withTimeoutOrNull(DETAIL_FETCH_TIMEOUT_MS) {
-                                            fetchDetailFromSearch(site, videoTitle)
-                                        }
-                                    }
-                                })
-                            }
-                    }.mapNotNull { it.await() }
-                }
-
-                val mergedResults = detailResults
-                    .distinctBy { it.site.api }
-                    .filterStrictMatches(videoTitle, preferredSite?.api)
-                val preferredResult = mergedResults.firstOrNull { it.site.api == preferredSite?.api }
-                val baseVideo = preferredResult?.video ?: mergedResults.firstOrNull()?.video
-
-                _videoDetail.value = baseVideo
-                val sources = mergedResults.flatMap { result ->
-                    parseSources(result.video.playFrom, result.video.playUrl).map { source ->
-                        source.copy(name = "${result.site.name} · ${source.name}")
+                val preferredDetail = preferredSite?.let { site ->
+                    withTimeoutOrNull(DETAIL_FETCH_TIMEOUT_MS) {
+                        fetchDetailFromPreferredSite(site, id, videoTitle)
                     }
                 }
-                _playSources.value = sources
-                detailCache[cacheKey] = baseVideo to sources
-                
-                // 预加载：在详情页即触发首个资源的 M3U8 解析与 TS 分片预热
-                sources.firstOrNull()?.episodes?.firstOrNull()?.let { firstEpisode ->
+                val initialMerged = listOfNotNull(preferredDetail)
+                    .distinctBy { it.site.api }
+                    .filterStrictMatches(videoTitle, preferredSite?.api)
+                val baseVideo = initialMerged.firstOrNull()?.video
+                val initialSources = initialMerged.flatMap { result ->
+                    parseSources(result.video.playFrom, result.video.playUrl).map { source ->
+                        source.copy(name = "${result.site.name} 路 ${source.name}")
+                    }
+                }
+                _videoDetail.value = baseVideo
+                _playSources.value = initialSources
+                detailCache[cacheKey] = baseVideo to initialSources
+                _isLoading.value = false
+
+                val backgroundResults = supervisorScope {
+                    candidateSites.filter { site -> site.api != preferredSite?.api }
+                        .map { site ->
+                            async {
+                                limiter.withPermit {
+                                    withTimeoutOrNull(DETAIL_BACKGROUND_TIMEOUT_MS) {
+                                        fetchDetailFromSearch(site, videoTitle)
+                                    }
+                                }
+                            }
+                        }.mapNotNull { it.await() }
+                }
+                val mergedResults = (initialMerged + backgroundResults)
+                    .distinctBy { it.site.api }
+                    .filterStrictMatches(videoTitle, preferredSite?.api)
+                val finalVideo = baseVideo ?: mergedResults.firstOrNull()?.video
+                val finalSources = mergedResults.flatMap { result ->
+                    parseSources(result.video.playFrom, result.video.playUrl).map { source ->
+                        source.copy(name = "${result.site.name} 路 ${source.name}")
+                    }
+                }
+                if (finalVideo != null || finalSources.isNotEmpty()) {
+                    _videoDetail.value = finalVideo
+                    _playSources.value = finalSources
+                    detailCache[cacheKey] = finalVideo to finalSources
+                }
+
+                finalSources.firstOrNull()?.episodes?.firstOrNull()?.let { firstEpisode ->
                     val firstUrl = firstEpisode.url
                     if (firstUrl.isNotBlank()) {
                         val p = com.example.myapplicationlibretv.download.parseVideoUrl(firstUrl)
@@ -256,7 +263,7 @@ class DetailViewModel(context: android.app.Application) : androidx.lifecycle.And
         val normalizedTarget = normalizeTitle(videoTitle)
         if (normalizedTarget.isBlank()) return null
         return candidates.firstOrNull { candidate ->
-            normalizeTitle(candidate.name) == normalizedTarget
+            isDetailTitleMatch(candidate.name, videoTitle)
         }
     }
 
@@ -277,11 +284,36 @@ class DetailViewModel(context: android.app.Application) : androidx.lifecycle.And
         val normalizedTarget = normalizeTitle(videoTitle)
         if (normalizedTarget.isBlank()) return this
         return filter { result ->
-            normalizeTitle(result.video.name) == normalizedTarget
+            isDetailTitleMatch(result.video.name, videoTitle)
         }.ifEmpty {
             // 原始源按 ID 拉回来的详情优先保留，避免标题别名造成空详情。
             firstOrNull { it.site.api == preferredApi }?.let(::listOf).orEmpty()
         }
+    }
+
+    private fun isDetailTitleMatch(candidateTitle: String, targetTitle: String): Boolean {
+        val candidate = normalizeTitle(candidateTitle)
+        val target = normalizeTitle(targetTitle)
+        if (candidate.isBlank() || target.isBlank()) return false
+        if (candidate == target) return true
+        val compactCandidate = stripDetailTitleNoise(candidate)
+        val compactTarget = stripDetailTitleNoise(target)
+        if (compactCandidate == compactTarget) return true
+        if (compactTarget.length >= 3 && compactCandidate.contains(compactTarget)) return true
+        if (compactCandidate.length >= 3 && compactTarget.contains(compactCandidate)) return true
+        return false
+    }
+
+    private fun stripDetailTitleNoise(value: String): String {
+        return value
+            .replace("国语", "")
+            .replace("粤语", "")
+            .replace("普通话", "")
+            .replace("高清", "")
+            .replace("蓝光", "")
+            .replace("全集", "")
+            .replace("完整版", "")
+            .replace("版", "")
     }
 }
 
@@ -344,51 +376,32 @@ fun VideoDetailScreen(
                     BoxWithConstraints(
                         modifier = Modifier.fillMaxWidth()
                     ) {
+                        val availableWidth = maxWidth
                         val sidePadding = when {
-                            maxWidth >= 900.dp -> 32.dp
-                            maxWidth >= 700.dp -> 24.dp
+                            availableWidth >= 900.dp -> 32.dp
+                            availableWidth >= 700.dp -> 24.dp
                             else -> 16.dp
                         }
-                        val compactLayout = maxWidth < 520.dp
                         val posterWidth = when {
-                            maxWidth >= 900.dp -> 200.dp
-                            maxWidth >= 700.dp -> 168.dp
-                            maxWidth >= 520.dp -> 140.dp
-                            else -> (maxWidth * 0.34f).coerceIn(104.dp, 148.dp)
+                            availableWidth >= 900.dp -> 210.dp
+                            availableWidth >= 700.dp -> 180.dp
+                            availableWidth >= 520.dp -> 152.dp
+                            availableWidth >= 400.dp -> 128.dp
+                            else -> (availableWidth * 0.32f).coerceIn(92.dp, 112.dp)
+                        }
+                        val actionsBesidePoster = availableWidth >= 640.dp
+                        val synopsisLines = when {
+                            availableWidth >= 900.dp -> 9
+                            availableWidth >= 640.dp -> 7
+                            availableWidth >= 420.dp -> 6
+                            else -> 5
                         }
 
-                        val contentHorizontalPadding = sidePadding
-                        if (compactLayout) {
-                            Column(
-                                modifier = Modifier.padding(horizontal = contentHorizontalPadding, vertical = 12.dp)
-                            ) {
-                                AsyncImage(
-                                    model = item.pic,
-                                    contentDescription = item.name,
-                                    modifier = Modifier
-                                        .width(posterWidth)
-                                        .aspectRatio(0.7f),
-                                    contentScale = ContentScale.Crop
-                                )
-                                Spacer(modifier = Modifier.height(12.dp))
-                                DetailHeaderText(
-                                    item = item,
-                                    sourceCount = sources.size
-                                )
-                                Spacer(modifier = Modifier.height(10.dp))
-                                DetailPlayButton(
-                                    item = item,
-                                    sources = sources,
-                                    selectedSourceIndex = selectedSourceIndex,
-                                    videoId = videoId,
-                                    viewModel = viewModel,
-                                    onPlayClick = onPlayClick,
-                                    onDownloadClick = { showDownloadSheet = true }
-                                )
-                            }
-                        } else {
+                        Column(
+                            modifier = Modifier.padding(horizontal = sidePadding, vertical = 12.dp)
+                        ) {
                             Row(
-                                modifier = Modifier.padding(horizontal = contentHorizontalPadding, vertical = 12.dp),
+                                modifier = Modifier.fillMaxWidth(),
                                 verticalAlignment = Alignment.Top
                             ) {
                                 AsyncImage(
@@ -399,23 +412,42 @@ fun VideoDetailScreen(
                                         .aspectRatio(0.7f),
                                     contentScale = ContentScale.Crop
                                 )
-                                Spacer(modifier = Modifier.width(16.dp))
+                                Spacer(modifier = Modifier.width(if (availableWidth >= 520.dp) 16.dp else 12.dp))
                                 Column(modifier = Modifier.weight(1f)) {
                                     DetailHeaderText(
                                         item = item,
                                         sourceCount = sources.size
                                     )
                                     Spacer(modifier = Modifier.height(10.dp))
-                                    DetailPlayButton(
-                                        item = item,
-                                        sources = sources,
-                                        selectedSourceIndex = selectedSourceIndex,
-                                        videoId = videoId,
-                                        viewModel = viewModel,
-                                        onPlayClick = onPlayClick,
-                                        onDownloadClick = { showDownloadSheet = true }
+                                    DetailSynopsis(
+                                        content = item.content,
+                                        maxLines = synopsisLines
                                     )
+                                    if (actionsBesidePoster) {
+                                        Spacer(modifier = Modifier.height(12.dp))
+                                        DetailPlayButton(
+                                            item = item,
+                                            sources = sources,
+                                            selectedSourceIndex = selectedSourceIndex,
+                                            videoId = videoId,
+                                            viewModel = viewModel,
+                                            onPlayClick = onPlayClick,
+                                            onDownloadClick = { showDownloadSheet = true }
+                                        )
+                                    }
                                 }
+                            }
+                            if (!actionsBesidePoster) {
+                                Spacer(modifier = Modifier.height(12.dp))
+                                DetailPlayButton(
+                                    item = item,
+                                    sources = sources,
+                                    selectedSourceIndex = selectedSourceIndex,
+                                    videoId = videoId,
+                                    viewModel = viewModel,
+                                    onPlayClick = onPlayClick,
+                                    onDownloadClick = { showDownloadSheet = true }
+                                )
                             }
                         }
                     }
@@ -497,15 +529,6 @@ fun VideoDetailScreen(
                                     }
                                 }
 
-                                item {
-                                    Spacer(modifier = Modifier.height(16.dp))
-                                    Text(
-                                        text = "简介: " + (item.content ?: "暂无介绍"),
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        modifier = Modifier.padding(top = 8.dp)
-                                    )
-                                }
                             }
                         }
                     }
@@ -590,6 +613,29 @@ private fun DetailHeaderText(
             text = "聚合源数: $sourceCount",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+}
+
+@Composable
+private fun DetailSynopsis(
+    content: String?,
+    maxLines: Int
+) {
+    Column {
+        Text(
+            text = "简介",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.primary,
+            fontWeight = FontWeight.SemiBold
+        )
+        Spacer(modifier = Modifier.height(4.dp))
+        Text(
+            text = content?.takeIf { it.isNotBlank() } ?: "暂无简介",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = maxLines,
+            overflow = TextOverflow.Ellipsis
         )
     }
 }

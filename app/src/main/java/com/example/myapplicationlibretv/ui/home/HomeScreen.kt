@@ -1211,6 +1211,14 @@ private fun DownloadsTabContent(
                         }
                     }
                 }
+                item {
+                    DownloadBulkActionsRow(
+                        page = selectedDownloadPage,
+                        tasks = selectedGroupTasks,
+                        onPause = onPause,
+                        onResume = onResume
+                    )
+                }
                 items(selectedGroupTasks, key = { it.id }) { task ->
                     if (selectedDownloadPage == 1) {
                         DownloadCompletedRow(
@@ -1270,6 +1278,15 @@ private fun DownloadsTabContent(
                 }
             }
 
+            item {
+                DownloadBulkActionsRow(
+                    page = selectedDownloadPage,
+                    tasks = visibleTasks,
+                    onPause = onPause,
+                    onResume = onResume
+                )
+            }
+
             if (visibleTasks.isEmpty()) {
                 item {
                     Box(
@@ -1313,6 +1330,77 @@ private fun DownloadsTabContent(
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DownloadBulkActionsRow(
+    page: Int,
+    tasks: List<DownloadTaskInfo>,
+    onPause: (DownloadTaskInfo) -> Unit,
+    onResume: (DownloadTaskInfo) -> Unit
+) {
+    val pauseTargets = remember(tasks) {
+        tasks.filter { it.status == DownloadStatus.RUNNING || it.status == DownloadStatus.QUEUED }
+    }
+    val resumeTargets = remember(tasks) {
+        tasks.filter { it.status == DownloadStatus.PAUSED }
+    }
+    val retryTargets = remember(tasks) {
+        tasks.filter { it.status == DownloadStatus.FAILED }
+    }
+
+    when (page) {
+        0 -> {
+            if (pauseTargets.isEmpty() && resumeTargets.isEmpty()) return
+            BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+                val compact = maxWidth < 420.dp
+                if (compact) {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(
+                            onClick = { pauseTargets.forEach(onPause) },
+                            enabled = pauseTargets.isNotEmpty(),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text("全部暂停")
+                        }
+                        Button(
+                            onClick = { resumeTargets.forEach(onResume) },
+                            enabled = resumeTargets.isNotEmpty(),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text("全部开始")
+                        }
+                    }
+                } else {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(
+                            onClick = { pauseTargets.forEach(onPause) },
+                            enabled = pauseTargets.isNotEmpty(),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("全部暂停")
+                        }
+                        Button(
+                            onClick = { resumeTargets.forEach(onResume) },
+                            enabled = resumeTargets.isNotEmpty(),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("全部开始")
+                        }
+                    }
+                }
+            }
+        }
+        2 -> {
+            if (retryTargets.isEmpty()) return
+            Button(
+                onClick = { retryTargets.forEach(onResume) },
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("全部重试")
             }
         }
     }

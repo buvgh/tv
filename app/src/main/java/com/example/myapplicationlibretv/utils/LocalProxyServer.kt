@@ -393,7 +393,7 @@ class LocalProxyServer(private val context: Context, private val port: Int = 888
         }
         requestBuilder.header("Range", "bytes=$start-$end")
         client.newCall(requestBuilder.build()).execute().use { response ->
-            if (response.code !in listOf(200, 206)) {
+            if (response.code != 206) {
                 throw IOException("Unexpected code ${response.code}")
             }
             val body = response.body ?: throw IOException("Empty body")
@@ -495,8 +495,7 @@ class LocalProxyServer(private val context: Context, private val port: Int = 888
                     ?: response.header("Content-Length")?.toLongOrNull()
                     ?: response.body?.contentLength()
                     ?: 0L
-                val acceptRanges = response.code == 206 ||
-                    response.header("Accept-Ranges").orEmpty().contains("bytes", ignoreCase = true) ||
+                val acceptRanges = response.code == 206 &&
                     contentRange.startsWith("bytes", ignoreCase = true)
                 DirectMediaMetadata(
                     mimeType = response.header("Content-Type").orEmpty().ifBlank { detectMimeType(url) },

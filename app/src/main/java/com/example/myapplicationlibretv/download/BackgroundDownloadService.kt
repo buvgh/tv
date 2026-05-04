@@ -13,6 +13,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.UUID
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
@@ -126,7 +127,7 @@ class BackgroundDownloadService : Service() {
                 }
                 val rawUrl = intent?.getStringExtra(EXTRA_RAW_URL)
                 val title = intent?.getStringExtra(EXTRA_TITLE)
-                val job = serviceScope.launch {
+                val job = serviceScope.launch(start = CoroutineStart.LAZY) {
                     val record = DownloadCenter.getTask(applicationContext, taskId)
                     val targetUrl = rawUrl ?: record?.rawUrl.orEmpty()
                     val targetTitle = title ?: record?.title ?: "视频下载"
@@ -174,6 +175,10 @@ class BackgroundDownloadService : Service() {
                     }
                 }
                 activeJobs[taskId] = job
+                job.invokeOnCompletion {
+                    activeJobs.remove(taskId)
+                }
+                job.start()
             }
         }
 

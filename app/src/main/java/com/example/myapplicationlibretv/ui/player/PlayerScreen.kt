@@ -5,6 +5,7 @@ import android.app.PictureInPictureParams
 import android.content.Context
 import android.content.ContextWrapper
 import android.content.pm.ActivityInfo
+import android.graphics.Rect
 import android.content.SharedPreferences
 import android.os.Build
 import android.util.Rational
@@ -12,6 +13,7 @@ import android.view.Surface
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
+import android.view.OrientationEventListener
 import android.widget.FrameLayout
 import android.widget.ImageButton
 import androidx.annotation.OptIn
@@ -172,7 +174,8 @@ fun PlayerScreen(
             return@LaunchedEffect
         }
         isDetectingLatency = false
-        val results = remoteCandidates.map { url ->
+        val probeTargets = remoteCandidates.take(6)
+        val results = probeTargets.map { url ->
             async(Dispatchers.IO) {
                 val probe = probePlayableCandidate(url)
                 Triple(url, probe.mimeType, probe)
@@ -186,6 +189,9 @@ fun PlayerScreen(
                     .thenBy { it.third.latencyMs }
             )
             .map { it.first }
+        sortedCandidates = (sorted + remoteCandidates.drop(probeTargets.size) + candidates.filter(::isLocalUri))
+            .distinct()
+        currentIndex = 0
         isDetectingLatency = false
         
         // 触发最优线路预载
@@ -269,7 +275,14 @@ fun PlayerScreen(
                 ?: 0.5f)
         )
     }
-    var volume by remember { mutableFloatStateOf(audioManager.getStreamVolume(AudioManager.STREAM_MUSIC).toFloat() / audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)) }
+    val maxMusicVolume = remember(audioManager) {
+        audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1)
+    }
+    var volume by remember {
+        mutableFloatStateOf(
+            audioManager.getStreamVolume(AudioManager.STREAM_MUSIC).toFloat() / maxMusicVolume
+        )
+    }
     
     var showBrightnessOverlay by remember { mutableStateOf(false) }
     var showVolumeOverlay by remember { mutableStateOf(false) }
@@ -278,8 +291,13 @@ fun PlayerScreen(
     var seekTargetMs by remember { mutableLongStateOf(0L) }
     var dragAccumulatorX by remember { mutableFloatStateOf(0f) }
     var dragAccumulatorY by remember { mutableFloatStateOf(0f) }
+    var dragStartVolume by remember { mutableFloatStateOf(volume) }
+    var lastAppliedStreamVolume by remember {
+        mutableIntStateOf(audioManager.getStreamVolume(AudioManager.STREAM_MUSIC))
+    }
     var gestureMode by remember { mutableIntStateOf(0) }
     var manualOrientation by remember { mutableIntStateOf(ActivityInfo.SCREEN_ORIENTATION_USER_PORTRAIT) }
+    var physicalOrientationDegrees by remember { mutableIntStateOf(OrientationEventListener.ORIENTATION_UNKNOWN) }
     val dragThresholdPx = with(LocalDensity.current) { 18.dp.toPx() }
     val ratioModes = remember {
         listOf(
@@ -289,6 +307,22 @@ fun PlayerScreen(
         )
     }
     // 播放器只支持手动横竖屏切换，不跟随传感器自动旋转。
+    DisposableEffect(context) {
+        val listener = object : OrientationEventListener(context.applicationContext) {
+            override fun onOrientationChanged(orientation: Int) {
+                if (orientation != ORIENTATION_UNKNOWN) {
+                    physicalOrientationDegrees = orientation
+                }
+            }
+        }
+        if (listener.canDetectOrientation()) {
+            listener.enable()
+        }
+        onDispose {
+            listener.disable()
+        }
+    }
+
     DisposableEffect(manualOrientation, videoId) {
         activity?.apply {
             requestedOrientation = manualOrientation
@@ -344,14 +378,14 @@ fun PlayerScreen(
 
         val httpDataSourceFactory = DefaultHttpDataSource.Factory()
             .setAllowCrossProtocolRedirects(true)
-            .setConnectTimeoutMs(15_000)
-            .setReadTimeoutMs(20_000)
+            .setConnectTimeoutMs(8_000)
+            .setReadTimeoutMs(16_000)
             .setUserAgent(NetworkTuning.DESKTOP_BROWSER_UA)
             .setDefaultRequestProperties(requestProperties)
         val dataSourceFactory = DefaultDataSource.Factory(context, httpDataSourceFactory)
 
         val loadControl = DefaultLoadControl.Builder()
-            .setBufferDurationsMs(2000, 50000, 1000, 1500)
+            .setBufferDurationsMs(6000, 90000, 1500, 4500)
             .build()
 
         ExoPlayer.Builder(context)
@@ -605,8 +639,8 @@ fun PlayerScreen(
         }
     }
 
-    LaunchedEffect(exoPlayer, volume) {
-        exoPlayer?.volume = volume.coerceIn(0f, 1f)
+    LaunchedEffect(exoPlayer) {
+        exoPlayer?.volume = 1f
     }
 
     LaunchedEffect(exoPlayer, currentIndex, reloadToken) {
@@ -665,6 +699,9 @@ fun PlayerScreen(
                         dragAccumulatorX = 0f
                         dragAccumulatorY = 0f
                         gestureMode = 0
+                        lastAppliedStreamVolume = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
+                        volume = lastAppliedStreamVolume.toFloat() / maxMusicVolume
+                        dragStartVolume = volume
                         showSeekOverlay = false
                         playerViewRef?.showController()
                         isControllerVisible = true
@@ -721,8 +758,21 @@ fun PlayerScreen(
                             }
                             2 -> {
                                 val sensitivity = 0.001f
-                                volume = (volume - dragAmount.y * sensitivity).coerceIn(0f, 1f)
-                                exoPlayer?.volume = volume
+                                val targetRatio = (dragStartVolume - dragAccumulatorY * sensitivity)
+                                    .coerceIn(0f, 1f)
+                                val targetStreamVolume = (targetRatio * maxMusicVolume)
+                                    .roundToInt()
+                                    .coerceIn(0, maxMusicVolume)
+                                volume = targetRatio
+                                if (targetStreamVolume != lastAppliedStreamVolume) {
+                                    audioManager.setStreamVolume(
+                                        AudioManager.STREAM_MUSIC,
+                                        targetStreamVolume,
+                                        0
+                                    )
+                                    lastAppliedStreamVolume = targetStreamVolume
+                                    exoPlayer?.volume = 1f
+                                }
                                 showVolumeOverlay = true
                                 showBrightnessOverlay = false
                             }
@@ -817,12 +867,12 @@ fun PlayerScreen(
                             TextButton(
                                 onClick = {
                                     playerViewRef?.showController()
-                                    manualOrientation = if (manualOrientation == ActivityInfo.SCREEN_ORIENTATION_USER_PORTRAIT) {
-                                        ActivityInfo.SCREEN_ORIENTATION_USER_LANDSCAPE
-                                    } else {
-                                        ActivityInfo.SCREEN_ORIENTATION_USER_PORTRAIT
-                                    }
-                                    toastMessage = if (manualOrientation == ActivityInfo.SCREEN_ORIENTATION_USER_LANDSCAPE) {
+                                    manualOrientation = resolveToggledPlayerOrientation(
+                                        activity = activity,
+                                        currentOrientation = manualOrientation,
+                                        physicalOrientationDegrees = physicalOrientationDegrees
+                                    )
+                                    toastMessage = if (isLandscapeOrientation(manualOrientation)) {
                                         "已切换横屏"
                                     } else {
                                         "已切换竖屏"
@@ -833,7 +883,7 @@ fun PlayerScreen(
                                     .background(Color.Black.copy(alpha = 0.5f), MaterialTheme.shapes.small)
                             ) {
                                 Text(
-                                    text = if (manualOrientation == ActivityInfo.SCREEN_ORIENTATION_USER_LANDSCAPE) "竖屏" else "横屏",
+                                    text = if (isLandscapeOrientation(manualOrientation)) "竖屏" else "横屏",
                                     color = Color.White
                                 )
                             }
@@ -913,12 +963,12 @@ fun PlayerScreen(
                         TextButton(
                             onClick = {
                                 playerViewRef?.showController()
-                                manualOrientation = if (manualOrientation == ActivityInfo.SCREEN_ORIENTATION_USER_PORTRAIT) {
-                                    ActivityInfo.SCREEN_ORIENTATION_USER_LANDSCAPE
-                                } else {
-                                    ActivityInfo.SCREEN_ORIENTATION_USER_PORTRAIT
-                                }
-                                toastMessage = if (manualOrientation == ActivityInfo.SCREEN_ORIENTATION_USER_LANDSCAPE) {
+                                manualOrientation = resolveToggledPlayerOrientation(
+                                    activity = activity,
+                                    currentOrientation = manualOrientation,
+                                    physicalOrientationDegrees = physicalOrientationDegrees
+                                )
+                                toastMessage = if (isLandscapeOrientation(manualOrientation)) {
                                     "已切换横屏"
                                 } else {
                                     "已切换竖屏"
@@ -929,7 +979,7 @@ fun PlayerScreen(
                                 .background(Color.Black.copy(alpha = 0.5f), MaterialTheme.shapes.small)
                         ) {
                             Text(
-                                text = if (manualOrientation == ActivityInfo.SCREEN_ORIENTATION_USER_LANDSCAPE) "竖屏" else "横屏",
+                                text = if (isLandscapeOrientation(manualOrientation)) "竖屏" else "横屏",
                                 color = Color.White
                             )
                         }
@@ -1188,6 +1238,7 @@ private fun isLocalUri(url: String): Boolean {
     return trimmed.startsWith("content://") || trimmed.startsWith("file://")
 }
 
+@OptIn(UnstableApi::class)
 private fun inferMimeTypeFromUrl(url: String): String? {
     val lower = url.lowercase()
     return when {
@@ -1202,6 +1253,7 @@ private fun inferMimeTypeFromUrl(url: String): String? {
     }
 }
 
+@OptIn(UnstableApi::class)
 private fun detectMimeTypeFromNetwork(url: String, sourceHeaders: Map<String, String>): String? {
     val client = NetworkTuning.createTunedClient(trustAllSsl = true)
     val headers = NetworkTuning.buildCommonHeaders(url, sourceHeaders)
@@ -1231,6 +1283,7 @@ private data class CandidateProbeResult(
     val mimeType: String?
 )
 
+@OptIn(UnstableApi::class)
 private fun probePlayableCandidate(rawUrl: String): CandidateProbeResult {
     val start = System.currentTimeMillis()
     val parsed = parseVideoUrl(rawUrl)
@@ -1310,6 +1363,47 @@ private fun resolveCurrentOrientationLock(activity: Activity?): Int {
     }
 }
 
+private fun resolveToggledPlayerOrientation(
+    activity: Activity?,
+    currentOrientation: Int,
+    physicalOrientationDegrees: Int
+): Int {
+    if (isLandscapeOrientation(currentOrientation)) {
+        return ActivityInfo.SCREEN_ORIENTATION_USER_PORTRAIT
+    }
+    return resolvePreferredLandscapeOrientation(activity, physicalOrientationDegrees)
+}
+
+private fun isLandscapeOrientation(orientation: Int): Boolean {
+    return orientation == ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE ||
+        orientation == ActivityInfo.SCREEN_ORIENTATION_REVERSE_LANDSCAPE ||
+        orientation == ActivityInfo.SCREEN_ORIENTATION_USER_LANDSCAPE ||
+        orientation == ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+}
+
+private fun resolvePreferredLandscapeOrientation(
+    activity: Activity?,
+    physicalOrientationDegrees: Int
+): Int {
+    if (physicalOrientationDegrees != OrientationEventListener.ORIENTATION_UNKNOWN) {
+        return when (physicalOrientationDegrees) {
+            in 45..134 -> ActivityInfo.SCREEN_ORIENTATION_REVERSE_LANDSCAPE
+            in 225..314 -> ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+            else -> resolveCurrentLandscapeOrientation(activity)
+        }
+    }
+    return resolveCurrentLandscapeOrientation(activity)
+}
+
+private fun resolveCurrentLandscapeOrientation(activity: Activity?): Int {
+    val current = resolveCurrentOrientationLock(activity)
+    return when (current) {
+        ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE,
+        ActivityInfo.SCREEN_ORIENTATION_REVERSE_LANDSCAPE -> current
+        else -> ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+    }
+}
+
 private fun enterPictureInPictureIfPossible(
     activity: Activity?,
     exoPlayer: ExoPlayer,
@@ -1326,6 +1420,12 @@ private fun enterPictureInPictureIfPossible(
     val aspectRatio = resolvePictureInPictureAspectRatio(exoPlayer, playerView)
     val paramsBuilder = PictureInPictureParams.Builder()
     aspectRatio?.let(paramsBuilder::setAspectRatio)
+    playerView?.let { view ->
+        val sourceRect = Rect()
+        if (view.getGlobalVisibleRect(sourceRect) && !sourceRect.isEmpty) {
+            paramsBuilder.setSourceRectHint(sourceRect)
+        }
+    }
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
         paramsBuilder.setAutoEnterEnabled(true)
         paramsBuilder.setSeamlessResizeEnabled(true)

@@ -42,8 +42,8 @@ object NetworkTuning {
         }
         val builder = OkHttpClient.Builder()
             .dispatcher(dispatcher)
-            .connectTimeout(5, TimeUnit.SECONDS)
-            .readTimeout(8, TimeUnit.SECONDS)
+            .connectTimeout(4, TimeUnit.SECONDS)
+            .readTimeout(7, TimeUnit.SECONDS)
             .writeTimeout(10, TimeUnit.SECONDS)
             .callTimeout(0, TimeUnit.SECONDS)
             .retryOnConnectionFailure(true)
@@ -176,12 +176,12 @@ private class AdaptiveTimeoutInterceptor : Interceptor {
         val routeMode = NetworkRouteClassifier.classify(request.url, chain.connection()?.route()?.proxy)
         val tunedChain = when (routeMode) {
             NetworkRouteMode.DIRECT_CN -> chain
-                .withConnectTimeout(4, TimeUnit.SECONDS)
-                .withReadTimeout(7, TimeUnit.SECONDS)
+                .withConnectTimeout(3, TimeUnit.SECONDS)
+                .withReadTimeout(6, TimeUnit.SECONDS)
                 .withWriteTimeout(9, TimeUnit.SECONDS)
             NetworkRouteMode.DIRECT_GLOBAL -> chain
-                .withConnectTimeout(6, TimeUnit.SECONDS)
-                .withReadTimeout(10, TimeUnit.SECONDS)
+                .withConnectTimeout(3, TimeUnit.SECONDS)
+                .withReadTimeout(5, TimeUnit.SECONDS)
                 .withWriteTimeout(10, TimeUnit.SECONDS)
             NetworkRouteMode.PROXY -> chain
                 .withConnectTimeout(8, TimeUnit.SECONDS)
@@ -199,7 +199,8 @@ private class SimpleRetryInterceptor : Interceptor {
         val routeMode = NetworkRouteClassifier.classify(request.url, chain.connection()?.route()?.proxy)
         val maxAttempts = when (routeMode) {
             NetworkRouteMode.DIRECT_CN -> 2
-            NetworkRouteMode.DIRECT_GLOBAL, NetworkRouteMode.PROXY -> 3
+            NetworkRouteMode.DIRECT_GLOBAL -> 1
+            NetworkRouteMode.PROXY -> 2
         }
         repeat(maxAttempts) { attempt ->
             try {

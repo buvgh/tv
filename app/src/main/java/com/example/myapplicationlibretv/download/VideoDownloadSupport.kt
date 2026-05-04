@@ -15,6 +15,7 @@ import java.io.IOException
 import java.net.URL
 import java.net.URLDecoder
 import java.nio.charset.StandardCharsets
+import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 import javax.crypto.Cipher
@@ -33,10 +34,10 @@ import okhttp3.Request
 import okhttp3.Response
 import kotlin.coroutines.coroutineContext
 
-private const val DIRECT_DOWNLOAD_PARALLELISM = 8
-private const val M3U8_DOWNLOAD_PARALLELISM = 12
-private const val PLAYBACK_DIRECT_DOWNLOAD_PARALLELISM = 3
-private const val PLAYBACK_M3U8_DOWNLOAD_PARALLELISM = 4
+private const val DIRECT_DOWNLOAD_PARALLELISM = 4
+private const val M3U8_DOWNLOAD_PARALLELISM = 6
+private const val PLAYBACK_DIRECT_DOWNLOAD_PARALLELISM = 2
+private const val PLAYBACK_M3U8_DOWNLOAD_PARALLELISM = 2
 private const val MIN_PARALLEL_FILE_SIZE = 8L * 1024 * 1024
 private const val DOWNLOAD_REQUEST_RETRY_COUNT = 5
 
@@ -200,13 +201,27 @@ private suspend fun downloadDirectFile(
         val mergedFile = File(taskDir, fileName)
 
         if (contentLength >= MIN_PARALLEL_FILE_SIZE && acceptRanges) {
-            parallelDownloadByRange(
-                client = client,
-                parsed = parsed,
-                totalBytes = contentLength,
-                outputFile = mergedFile,
-                onProgress = onProgress
-            )
+            response.close()
+            runCatching {
+                parallelDownloadByRange(
+                    client = client,
+                    parsed = parsed,
+                    totalBytes = contentLength,
+                    outputFile = mergedFile,
+                    onProgress = onProgress
+                )
+            }.getOrElse {
+                mergedFile.delete()
+                partFilesFor(mergedFile).forEach { part -> part.delete() }
+                onProgress("分段下载不可用，改用普通下载")
+                resumableSequentialDownload(
+                    client = client,
+                    parsed = parsed,
+                    outputFile = mergedFile,
+                    totalBytes = contentLength,
+                    onProgress = onProgress
+                )
+            }
         } else if (acceptRanges && contentLength > 0L) {
             response.close()
             resumableSequentialDownload(
@@ -217,9 +232,23 @@ private suspend fun downloadDirectFile(
                 onProgress = onProgress
             )
         } else {
-            sequentialDownload(response, mergedFile, contentLength, onProgress)
+            runCatching {
+                sequentialDownload(response, mergedFile, contentLength, onProgress)
+            }.getOrElse { firstError ->
+                retrySequentialFromStart(
+                    client = client,
+                    parsed = parsed,
+                    outputFile = mergedFile,
+                    totalBytes = contentLength,
+                    onProgress = onProgress,
+                    firstError = firstError
+                )
+            }
         }
 
+        if (!mergedFile.exists() || mergedFile.length() <= 0L) {
+            error("下载文件为空")
+        }
         val savedUri = persistTempFileToDownloads(
             context = context,
             tempFile = mergedFile,
@@ -230,6 +259,36 @@ private suspend fun downloadDirectFile(
         taskDir.deleteRecursively()
         DownloadResult(fileName, savedUri.toString())
     }
+}
+
+private fun retrySequentialFromStart(
+    client: OkHttpClient,
+    parsed: ParsedVideoUrl,
+    outputFile: File,
+    totalBytes: Long,
+    onProgress: (String) -> Unit,
+    firstError: Throwable
+) {
+    var lastError = firstError
+    repeat(DOWNLOAD_REQUEST_RETRY_COUNT - 1) { attempt ->
+        if (!shouldRetryStreamRead(lastError)) throw lastError
+        outputFile.delete()
+        onProgress("连接中断，重新下载 ${attempt + 1}/${DOWNLOAD_REQUEST_RETRY_COUNT - 1}")
+        try {
+            executeRequestWithRetry(
+                client = client,
+                request = buildRequest(parsed),
+                label = "重新下载"
+            ).use { retryResponse ->
+                ensureSuccessful(retryResponse)
+                sequentialDownload(retryResponse, outputFile, totalBytes, onProgress)
+            }
+            return
+        } catch (e: Throwable) {
+            lastError = e
+        }
+    }
+    throw lastError
 }
 
 private suspend fun parallelDownloadByRange(
@@ -271,9 +330,12 @@ private suspend fun parallelDownloadByRange(
             executeRequestWithRetry(
                 client = client,
                 request = request,
-                acceptedCodes = setOf(200, 206),
+                acceptedCodes = setOf(206),
                 label = "分片 ${index + 1}"
             ).use { response ->
+                if (response.code != 206) {
+                    error("分片 ${index + 1} 不支持断点下载")
+                }
                 val body = response.body ?: error("Empty response body")
                 FileOutputStream(partFile, existingSize > 0L).use { output ->
                     val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
@@ -327,6 +389,17 @@ private fun sequentialDownload(
             }
         }
     }
+    if (totalBytes > 0L && written < totalBytes) {
+        error("下载不完整：$written/$totalBytes")
+    }
+}
+
+private fun partFilesFor(outputFile: File): List<File> {
+    val parent = outputFile.parentFile ?: return emptyList()
+    val prefix = "${outputFile.name}.part"
+    return parent.listFiles()
+        ?.filter { it.isFile && it.name.startsWith(prefix) }
+        .orEmpty()
 }
 
 private fun resumableSequentialDownload(
@@ -351,9 +424,14 @@ private fun resumableSequentialDownload(
     executeRequestWithRetry(
         client = client,
         request = request,
-        acceptedCodes = setOf(200, 206),
+        acceptedCodes = if (existingBytes > 0L) setOf(206) else setOf(200, 206),
         label = "续传"
     ).use { response ->
+        if (existingBytes > 0L && response.code != 206) {
+            outputFile.delete()
+            sequentialDownload(response, outputFile, totalBytes, onProgress)
+            return
+        }
         val body = response.body ?: error("Empty response body")
         var written = existingBytes
         FileOutputStream(outputFile, existingBytes > 0L).use { output ->
@@ -367,6 +445,9 @@ private fun resumableSequentialDownload(
                     onProgress(buildProgressText(written, totalBytes, startTime, resumed = existingBytes > 0L))
                 }
             }
+        }
+        if (totalBytes > 0L && written < totalBytes) {
+            error("下载不完整：$written/$totalBytes")
         }
     }
 }
@@ -401,35 +482,35 @@ private suspend fun downloadM3u8AsTs(
         onProgress("续传分片 $existingSegments/${segments.size}")
     }
 
-    segments.mapIndexed { index, segment ->
-        async {
-            coroutineContext.ensureActive()
-            val segmentFile = segmentFiles[index]
-            if (segmentFile.exists() && segmentFile.length() > 0L) return@async
-
-            limiter.withPermit {
-                throttleForPlayback()
-                val outputBytes = downloadHlsSegmentBytesWithRetry(
-                    client = client,
-                    parsed = parsed,
-                    segment = segment,
-                    index = index,
-                    keyCache = keyCache
-                )
-                FileOutputStream(segmentFile).use { output ->
-                    output.write(outputBytes)
-                }
-                val done = completedSegments.incrementAndGet()
-                onProgress(
-                    if (existingSegments > 0L) {
-                        "续传分片 $done/${segments.size}"
-                    } else {
-                        "分片 $done/${segments.size}"
-                    }
-                )
-            }
+    runCatching {
+        downloadHlsSegments(
+            client = client,
+            parsed = parsed,
+            segments = segments,
+            segmentFiles = segmentFiles,
+            limiter = limiter,
+            keyCache = keyCache,
+            completedSegments = completedSegments,
+            existingSegments = existingSegments,
+            onProgress = onProgress
+        )
+    }.getOrElse { firstError ->
+        onProgress("分片并发失败，低速重试")
+        downloadMissingHlsSegmentsSequentially(
+            client = client,
+            parsed = parsed,
+            segments = segments,
+            segmentFiles = segmentFiles,
+            keyCache = keyCache,
+            completedSegments = completedSegments,
+            existingSegments = existingSegments,
+            onProgress = onProgress
+        )
+        val missing = segmentFiles.indexOfFirst { !it.exists() || it.length() <= 0L }
+        if (missing >= 0) {
+            throw firstError
         }
-    }.awaitAll()
+    }
 
     val mergedFile = File(taskDir, fileName)
     FileOutputStream(mergedFile).use { merged ->
@@ -449,6 +530,107 @@ private suspend fun downloadM3u8AsTs(
     )
     taskDir.deleteRecursively()
     DownloadResult(fileName, savedUri.toString())
+}
+
+private suspend fun downloadHlsSegments(
+    client: OkHttpClient,
+    parsed: ParsedVideoUrl,
+    segments: List<HlsSegmentItem>,
+    segmentFiles: List<File>,
+    limiter: Semaphore,
+    keyCache: ConcurrentHashMap<String, ByteArray>,
+    completedSegments: AtomicLong,
+    existingSegments: Long,
+    onProgress: (String) -> Unit
+) = coroutineScope {
+    segments.mapIndexed { index, segment ->
+        async {
+            coroutineContext.ensureActive()
+            val segmentFile = segmentFiles[index]
+            if (segmentFile.exists() && segmentFile.length() > 0L) return@async
+
+            limiter.withPermit {
+                throttleForPlayback()
+                writeHlsSegmentFile(
+                    client = client,
+                    parsed = parsed,
+                    segment = segment,
+                    index = index,
+                    segmentFile = segmentFile,
+                    keyCache = keyCache
+                )
+                reportHlsSegmentProgress(completedSegments, existingSegments, segments.size, onProgress)
+            }
+        }
+    }.awaitAll()
+}
+
+private fun downloadMissingHlsSegmentsSequentially(
+    client: OkHttpClient,
+    parsed: ParsedVideoUrl,
+    segments: List<HlsSegmentItem>,
+    segmentFiles: List<File>,
+    keyCache: ConcurrentHashMap<String, ByteArray>,
+    completedSegments: AtomicLong,
+    existingSegments: Long,
+    onProgress: (String) -> Unit
+) {
+    segments.forEachIndexed { index, segment ->
+        val segmentFile = segmentFiles[index]
+        if (segmentFile.exists() && segmentFile.length() > 0L) return@forEachIndexed
+        throttleForPlayback()
+        writeHlsSegmentFile(
+            client = client,
+            parsed = parsed,
+            segment = segment,
+            index = index,
+            segmentFile = segmentFile,
+            keyCache = keyCache
+        )
+        reportHlsSegmentProgress(completedSegments, existingSegments, segments.size, onProgress)
+    }
+}
+
+private fun writeHlsSegmentFile(
+    client: OkHttpClient,
+    parsed: ParsedVideoUrl,
+    segment: HlsSegmentItem,
+    index: Int,
+    segmentFile: File,
+    keyCache: ConcurrentHashMap<String, ByteArray>
+) {
+    val tempFile = File(segmentFile.parentFile, "${segmentFile.name}.download")
+    tempFile.delete()
+    val outputBytes = downloadHlsSegmentBytesWithRetry(
+        client = client,
+        parsed = parsed,
+        segment = segment,
+        index = index,
+        keyCache = keyCache
+    )
+    FileOutputStream(tempFile).use { output ->
+        output.write(outputBytes)
+    }
+    if (!tempFile.renameTo(segmentFile)) {
+        tempFile.copyTo(segmentFile, overwrite = true)
+        tempFile.delete()
+    }
+}
+
+private fun reportHlsSegmentProgress(
+    completedSegments: AtomicLong,
+    existingSegments: Long,
+    totalSegments: Int,
+    onProgress: (String) -> Unit
+) {
+    val done = completedSegments.incrementAndGet()
+    onProgress(
+        if (existingSegments > 0L) {
+            "续传分片 $done/$totalSegments"
+        } else {
+            "分片 $done/$totalSegments"
+        }
+    )
 }
 
 private fun downloadHlsSegmentBytesWithRetry(
@@ -737,8 +919,8 @@ private fun humanReadableBytes(bytes: Long): String {
     val kb = 1024.0
     val mb = kb * 1024
     return when {
-        bytes >= mb -> String.format("%.1f MB", bytes / mb)
-        bytes >= kb -> String.format("%.1f KB", bytes / kb)
+        bytes >= mb -> String.format(Locale.ROOT, "%.1f MB", bytes / mb)
+        bytes >= kb -> String.format(Locale.ROOT, "%.1f KB", bytes / kb)
         else -> "$bytes B"
     }
 }
@@ -782,8 +964,13 @@ private fun executeRequestWithRetry(
         try {
             val response = client.newCall(request).execute()
             val accepted = acceptedCodes?.contains(response.code) ?: response.isSuccessful
-            if (accepted || !isTransientHttpCode(response.code) || attempt == DOWNLOAD_REQUEST_RETRY_COUNT - 1) {
+            if (accepted) {
                 return response
+            }
+            if (!isTransientHttpCode(response.code) || attempt == DOWNLOAD_REQUEST_RETRY_COUNT - 1) {
+                val code = response.code
+                response.close()
+                throw IOException("$label HTTP $code")
             }
             lastError = IOException("HTTP ${response.code}")
             val retryAfterMs = response.header("Retry-After")

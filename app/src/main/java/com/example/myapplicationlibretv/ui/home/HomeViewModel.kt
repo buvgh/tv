@@ -2,6 +2,7 @@ package com.example.myapplicationlibretv.ui.home
 
 import android.content.Context
 import com.example.myapplicationlibretv.data.api.ActorFilmographyScraper
+import com.example.myapplicationlibretv.data.api.PlatformHotlistScraper
 import androidx.lifecycle.viewModelScope
 import com.example.myapplicationlibretv.data.api.fetchCmsResponse
 import com.example.myapplicationlibretv.data.api.RetrofitClient
@@ -55,16 +56,17 @@ class HomeViewModel(application: android.app.Application) : androidx.lifecycle.A
         private const val SEARCH_HISTORY_LIMIT = 12
         private const val FETCH_CONCURRENCY = 8
         private const val PROBE_CONCURRENCY = 8
-        private const val HOT_REQUEST_TIMEOUT_MS = 4_000L
-        private const val SEARCH_REQUEST_TIMEOUT_MS = 4_500L
-        private const val PERSON_SEARCH_REQUEST_TIMEOUT_MS = 7_000L
-        private const val PROBE_TIMEOUT_MS = 2_500L
+        private const val HOT_REQUEST_TIMEOUT_MS = 2_200L
+        private const val SEARCH_REQUEST_TIMEOUT_MS = 3_000L
+        private const val HOME_HOT_SEARCH_TIMEOUT_MS = 2_300L
+        private const val PERSON_SEARCH_REQUEST_TIMEOUT_MS = 5_500L
+        private const val PROBE_TIMEOUT_MS = 1_600L
         private const val SEARCH_DEBOUNCE_MS = 220L
         private const val HOT_CACHE_KEY = "hot_cache"
         private const val SITE_SCORE_KEY = "site_scores_v2"
         private const val ADULT_FILTER_KEY = "adult_filter_enabled"
         private const val HOME_DISPLAY_BY_SOURCE_KEY = "home_display_by_source"
-        private const val MAX_TRENDING_SITES = 18
+        private const val MAX_TRENDING_SITES = 24
         private const val MAX_SEARCH_SITES = 24
         private const val MAX_PERSON_SEARCH_SITES = 48
         private const val SEARCH_FALLBACK_MIN_RESULTS = 8
@@ -74,7 +76,14 @@ class HomeViewModel(application: android.app.Application) : androidx.lifecycle.A
         private const val PERSON_SEARCH_FALLBACK_SITES = 24
         private const val PERSON_SEARCH_FALLBACK_PAGES = 5
         private const val PERSON_SEARCH_DETAIL_ENRICH_LIMIT = 72
-        private const val PERSON_FIELD_SEARCH_SITES = 36
+        private const val PERSON_FIELD_SEARCH_SITES = 24
+        private const val PERSON_FILMOGRAPHY_SITES = 8
+        private const val PERSON_FILMOGRAPHY_TITLES = 12
+        private const val PERSON_FILMOGRAPHY_CONCURRENCY = 24
+        private const val PLATFORM_HOT_TITLE_LIMIT = 64
+        private const val PLATFORM_HOT_SITE_LIMIT = 10
+        private const val PLATFORM_HOT_CONCURRENCY = 24
+        private const val STARTUP_PROBE_SITE_LIMIT = 28
     }
 
     private val videoDao = AppDatabase.getDatabase(application).videoDao()
@@ -138,8 +147,8 @@ class HomeViewModel(application: android.app.Application) : androidx.lifecycle.A
         viewModelScope.launch {
             ensureDefaultSubscriptions()
             loadCachedTrending()
-            // 启动时自动全量刷新订阅源与资源
-            refreshSubscriptions(manual = true)
+            fetchVideos(keyword = null)
+            refreshSubscriptions(manual = false)
         }
         startAutoUpdate()
     }
@@ -250,29 +259,50 @@ class HomeViewModel(application: android.app.Application) : androidx.lifecycle.A
                     return@launch
                 }
 
-                val results = fetchSiteResults(
-                    sites = sitesSnapshot,
-                    searchKeyword = searchKeyword,
-                    refreshToken = refreshToken
-                )
-
-                val healthUpdates = mutableListOf<Pair<String, Boolean>>()
-                val succeeded = results.mapIndexedNotNull { index, result ->
-                    val site = sitesSnapshot.getOrNull(index) ?: return@mapIndexedNotNull null
-                    healthUpdates += site.api to result.isSuccess
-                    result.getOrNull()
-                }
-                updateSiteHealthBatch(healthUpdates)
-                val failedCount = results.count { it.isFailure }
                 val merged = if (_homeDisplayBySourceEnabled.value) {
+                    val results = fetchSiteResults(
+                        sites = sitesSnapshot,
+                        searchKeyword = searchKeyword,
+                        refreshToken = refreshToken
+                    )
+                    val healthUpdates = mutableListOf<Pair<String, Boolean>>()
+                    val succeeded = results.mapIndexedNotNull { index, result ->
+                        val site = sitesSnapshot.getOrNull(index) ?: return@mapIndexedNotNull null
+                        healthUpdates += site.api to result.isSuccess
+                        result.getOrNull()
+                    }
+                    updateSiteHealthBatch(healthUpdates)
                     succeeded.flatten()
                         .let(::applyContentFilter)
                         .distinctBy { "${it.siteKey}:${it.video.id}" }
                 } else {
-                    buildTrendingVideos(
-                        videos = applyContentFilter(succeeded.flatten()),
-                        refreshToken = refreshToken
-                    )
+                    val platformTrending = withTimeoutOrNull(12_000L) {
+                        fetchPlatformHotlistVideos(sitesSnapshot)
+                    }.orEmpty()
+                    if (platformTrending.size >= 72) {
+                        platformTrending
+                    } else {
+                        val results = fetchSiteResults(
+                            sites = sitesSnapshot,
+                            searchKeyword = searchKeyword,
+                            refreshToken = refreshToken
+                        )
+                        val healthUpdates = mutableListOf<Pair<String, Boolean>>()
+                        val succeeded = results.mapIndexedNotNull { index, result ->
+                            val site = sitesSnapshot.getOrNull(index) ?: return@mapIndexedNotNull null
+                            healthUpdates += site.api to result.isSuccess
+                            result.getOrNull()
+                        }
+                        updateSiteHealthBatch(healthUpdates)
+                        val siteTrending = buildTrendingVideos(
+                            videos = applyContentFilter(succeeded.flatten()),
+                            refreshToken = refreshToken
+                        )
+                        (platformTrending + siteTrending)
+                            .distinctBy { "${it.siteKey}:${it.video.id}" }
+                            .distinctBy { normalizeVideoName(it.video.name) }
+                            .take(140)
+                    }
                 }
 
                 _videoList.value = merged
@@ -283,8 +313,6 @@ class HomeViewModel(application: android.app.Application) : androidx.lifecycle.A
 
                 if (merged.isEmpty()) {
                     _errorMessage.value = "暂无热门推荐"
-                } else if (failedCount > 0) {
-                    _errorMessage.value = "已为你刷新热门推荐，部分源不可用（${failedCount}/${sitesSnapshot.size}）"
                 }
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
@@ -318,15 +346,40 @@ class HomeViewModel(application: android.app.Application) : androidx.lifecycle.A
                 }
 
                 var merged = emptyList<SourcedVideo>()
+                var filmographyLoaded = false
                 if (personSearchMode) {
-                    val personFieldCandidates = fetchPersonFieldSearchResults(
-                        personName = keyword,
-                        sites = sitesSnapshot.take(PERSON_FIELD_SEARCH_SITES)
-                    )
+                    val personFieldDeferred = async {
+                        fetchPersonFieldSearchResults(
+                            personName = keyword,
+                            sites = sitesSnapshot.take(PERSON_FIELD_SEARCH_SITES)
+                        )
+                    }
+                    val filmographyDeferred = async {
+                        fetchActorFilmographyResults(
+                            actorName = keyword,
+                            sites = sitesSnapshot
+                        )
+                    }
+
+                    val personFieldCandidates = personFieldDeferred.await()
                     merged = personFieldCandidates.distinctBy { "${it.siteKey}:${it.video.id}" }
                     if (merged.isNotEmpty() && _searchQuery.value.trim() == keyword) {
                         _searchResults.value = merged
                         _searchErrorMessage.value = null
+                    }
+
+                    val filmographyCandidates = filmographyDeferred.await()
+                    filmographyLoaded = true
+                    merged = (merged + filmographyCandidates)
+                        .distinctBy { "${it.siteKey}:${it.video.id}" }
+                    if (merged.isNotEmpty() && _searchQuery.value.trim() == keyword) {
+                        _searchResults.value = merged
+                        _searchErrorMessage.value = null
+                    }
+                    if (merged.size >= 24) {
+                        searchCache[keyword] = merged
+                        saveSearchKeyword(keyword)
+                        return@launch
                     }
                 }
 
@@ -375,7 +428,7 @@ class HomeViewModel(application: android.app.Application) : androidx.lifecycle.A
                         .distinctBy { "${it.siteKey}:${it.video.id}" }
                 }
 
-                if (merged.size < SEARCH_FALLBACK_MIN_RESULTS) {
+                if ((!personSearchMode || merged.isEmpty()) && merged.size < SEARCH_FALLBACK_MIN_RESULTS) {
                     val fallbackCandidates = fetchFallbackSearchResults(
                         searchKeyword = keyword,
                         sites = sitesSnapshot.take(if (personSearchMode) PERSON_SEARCH_FALLBACK_SITES else SEARCH_FALLBACK_SITES),
@@ -386,7 +439,7 @@ class HomeViewModel(application: android.app.Application) : androidx.lifecycle.A
                         .distinctBy { "${it.siteKey}:${it.video.id}" }
                 }
 
-                if (personSearchMode && merged.size < 20) {
+                if (personSearchMode && !filmographyLoaded && merged.size < 20) {
                     val filmographyCandidates = fetchActorFilmographyResults(
                         actorName = keyword,
                         sites = sitesSnapshot
@@ -495,10 +548,15 @@ class HomeViewModel(application: android.app.Application) : androidx.lifecycle.A
             val existingCount = SourceRepository.getSitesSnapshot().size
             val loadResult = SourceRepository.loadSubscription(urls.joinToString("\n"))
             val sitesSnapshot = loadResult.mergedSites
+            val sitesToProbe = if (manual) {
+                sitesSnapshot
+            } else {
+                prioritizeMainlandSites(sitesSnapshot, selectedKey).take(STARTUP_PROBE_SITE_LIMIT)
+            }
 
             val limiter = Semaphore(PROBE_CONCURRENCY)
             val reachable = supervisorScope {
-                sitesSnapshot.map { site ->
+                sitesToProbe.map { site ->
                     async {
                         limiter.withPermit {
                             site to runCatching { probeSite(site) }.getOrDefault(false)
@@ -679,7 +737,7 @@ class HomeViewModel(application: android.app.Application) : androidx.lifecycle.A
 
     private fun saveCachedTrending(videos: List<SourcedVideo>) {
         val payload = runCatching {
-            cacheJson.encodeToString(ListSerializer(SourcedVideo.serializer()), videos.take(90))
+            cacheJson.encodeToString(ListSerializer(SourcedVideo.serializer()), videos.take(140))
         }.getOrNull() ?: return
         prefs.edit().putString(HOT_CACHE_KEY, payload).apply()
     }
@@ -806,17 +864,91 @@ class HomeViewModel(application: android.app.Application) : androidx.lifecycle.A
             .take(80)
     }
 
+    private suspend fun fetchPlatformHotlistVideos(
+        sites: List<Site>
+    ): List<SourcedVideo> {
+        if (sites.isEmpty()) return emptyList()
+        val hotTitles = withTimeoutOrNull(2_000L) {
+            PlatformHotlistScraper.fetchHotTitles()
+        }.orEmpty()
+            .filter { it.isNotBlank() }
+            .take(PLATFORM_HOT_TITLE_LIMIT)
+        if (hotTitles.isEmpty()) return emptyList()
+
+        val targetSites = sites.take(PLATFORM_HOT_SITE_LIMIT)
+        val hotTitleRank = hotTitles
+            .mapIndexed { index, title -> normalizeVideoName(title) to index }
+            .toMap()
+        val limiter = Semaphore(PLATFORM_HOT_CONCURRENCY)
+        val candidates = mutableListOf<Pair<SourcedVideo, String>>()
+        val batches = hotTitles.chunked(10)
+        for (batch in batches) {
+            val batchCandidates = supervisorScope {
+                batch.flatMap { title ->
+                    targetSites.map { site ->
+                        async {
+                            limiter.withPermit {
+                                withTimeoutOrNull(HOME_HOT_SEARCH_TIMEOUT_MS) {
+                                    runCatching {
+                                        fetchCmsResponse(
+                                            baseUrl = site.api,
+                                            keyword = title
+                                        ).list.map { video ->
+                                            SourcedVideo(
+                                                siteKey = site.key ?: site.api,
+                                                siteName = site.name,
+                                                siteApi = site.api,
+                                                video = video
+                                            ) to title
+                                        }
+                                    }.getOrDefault(emptyList())
+                                }.orEmpty()
+                            }
+                        }
+                    }
+                }.map { it.await() }.flatten()
+            }
+            candidates += batchCandidates
+            if (candidates.size >= 120) break
+        }
+
+        val matched = candidates
+            .filter { (item, title) -> isKnownFilmographyTitleMatch(item.video.name, title) }
+        val allowedKeys = applyContentFilter(matched.map { it.first })
+            .map { "${it.siteKey}:${it.video.id}" }
+            .toSet()
+        return matched
+            .asSequence()
+            .filter { (item, _) -> "${item.siteKey}:${item.video.id}" in allowedKeys }
+            .distinctBy { normalizeVideoName(it.first.video.name) }
+            .sortedWith(
+                compareBy<Pair<SourcedVideo, String>> { (_, title) ->
+                    hotTitleRank[normalizeVideoName(title)] ?: Int.MAX_VALUE
+                }
+                    .thenByDescending { (item, _) -> homeRecencyScore(item.video) }
+                    .thenByDescending { (item, _) -> item.video.remarks.orEmpty() }
+            )
+            .map { it.first }
+            .take(140)
+            .toList()
+    }
+
     private suspend fun fetchActorFilmographyResults(
         actorName: String,
         sites: List<Site>
     ): List<SourcedVideo> {
-        val rawTitles = ActorFilmographyScraper.fetchKnownTitles(actorName)
+        val rawTitles = withTimeoutOrNull(5_000L) {
+            ActorFilmographyScraper.fetchKnownTitles(
+                personName = actorName,
+                includeAdultWebSearch = _adultContentEnabled.value
+            )
+        }.orEmpty()
         val titles = ActorFilmographyScraper.expandTitleAliases(rawTitles)
-            .take(32)
+            .take(PERSON_FILMOGRAPHY_TITLES)
         if (titles.isEmpty() || sites.isEmpty()) return emptyList()
 
-        val limiter = Semaphore(FETCH_CONCURRENCY)
-        val targetSites = sites.take(18)
+        val limiter = Semaphore(PERSON_FILMOGRAPHY_CONCURRENCY)
+        val targetSites = sites.take(PERSON_FILMOGRAPHY_SITES)
         val rawCandidates = supervisorScope {
             titles.flatMap { title ->
                 targetSites.map { site ->
@@ -849,12 +981,10 @@ class HomeViewModel(application: android.app.Application) : androidx.lifecycle.A
         )
         val filteredCandidates = applyContentFilter(enrichedCandidates)
         val creditMatched = filteredCandidates.filter { matchesPersonInCredits(actorName, it.video) }
-        val titleMatched = filterSearchResults(actorName, filteredCandidates)
         val filmographyMatched = filteredCandidates.filter { candidate ->
-            val normalizedName = normalizeVideoName(candidate.video.name)
-            titles.any { title -> normalizedName == normalizeVideoName(title) }
+            titles.any { title -> isKnownFilmographyTitleMatch(candidate.video.name, title) }
         }
-        return (creditMatched + titleMatched + filmographyMatched)
+        return (creditMatched + filmographyMatched)
             .distinctBy { "${it.siteKey}:${it.video.id}" }
             .take(120)
     }
@@ -866,8 +996,8 @@ class HomeViewModel(application: android.app.Application) : androidx.lifecycle.A
         val keyword = personName.trim()
         if (keyword.isBlank() || sites.isEmpty()) return emptyList()
 
-        val limiter = Semaphore(FETCH_CONCURRENCY)
-        val searchParams = listOf("actor", "director", "vod_actor", "vod_director", "wd")
+        val limiter = Semaphore(PERSON_FILMOGRAPHY_CONCURRENCY)
+        val searchParams = listOf("wd")
         val rawCandidates = supervisorScope {
             sites.flatMap { site ->
                 searchParams.map { param ->
@@ -1142,6 +1272,47 @@ class HomeViewModel(application: android.app.Application) : androidx.lifecycle.A
         }
     }
 
+    private fun isKnownFilmographyTitleMatch(videoName: String, knownTitle: String): Boolean {
+        val normalizedName = normalizeKnownWorkTitle(videoName)
+        val normalizedTitle = normalizeKnownWorkTitle(knownTitle)
+        if (normalizedName.isBlank() || normalizedTitle.isBlank()) return false
+        if (normalizedName.contains("解说")) return false
+        return normalizedName == normalizedTitle
+    }
+
+    private fun homeRecencyScore(video: VideoItem): Int {
+        val text = listOf(
+            video.year.orEmpty(),
+            video.time.orEmpty(),
+            video.remarks.orEmpty(),
+            video.name
+        ).joinToString(" ")
+        val years = Regex("""20\d{2}""")
+            .findAll(text)
+            .mapNotNull { it.value.toIntOrNull() }
+            .toList()
+        val year = years.maxOrNull() ?: 0
+        val updateScore = when {
+            video.remarks.orEmpty().contains("更", ignoreCase = true) -> 30
+            video.remarks.orEmpty().contains("完", ignoreCase = true) -> 20
+            else -> 0
+        }
+        return year * 100 + updateScore
+    }
+
+    private fun normalizeKnownWorkTitle(value: String): String {
+        return normalizeVideoName(value)
+            .replace("国语", "")
+            .replace("粤语", "")
+            .replace("普通话版", "")
+            .replace("粤语版", "")
+            .replace("原声版", "")
+            .replace("高清", "")
+            .replace("蓝光", "")
+            .replace("hd", "")
+            .replace("版", "")
+    }
+
     private fun normalizeVideoName(name: String): String {
         return name.lowercase()
             .replace(Regex("\\s+"), "")
@@ -1253,9 +1424,9 @@ class HomeViewModel(application: android.app.Application) : androidx.lifecycle.A
         refreshToken: Long? = null
     ): List<Site> {
         if (searchKeyword.isNullOrBlank()) {
-            if (allSites.size <= MAX_TRENDING_SITES) return allSites.shuffled(Random(refreshToken ?: System.nanoTime()))
-            return allSites
-                .shuffled(Random(refreshToken ?: System.nanoTime()))
+            val prioritized = prioritizeMainlandSites(allSites, currentSite.value?.key)
+            if (prioritized.size <= MAX_TRENDING_SITES) return prioritized
+            return prioritized
                 .take(MAX_TRENDING_SITES)
         }
         if (allSites.size <= MAX_SEARCH_SITES) return allSites
@@ -1272,6 +1443,40 @@ class HomeViewModel(application: android.app.Application) : androidx.lifecycle.A
 
         val limit = if (personSearchMode) MAX_PERSON_SEARCH_SITES else MAX_SEARCH_SITES
         return prioritized.take(limit)
+    }
+
+    private fun prioritizeMainlandSites(
+        sites: List<Site>,
+        selectedSiteKey: String?
+    ): List<Site> {
+        val scoreMap = loadSiteScores()
+        val seed = System.nanoTime()
+        return sites
+            .shuffled(Random(seed))
+            .sortedWith(
+                compareByDescending<Site> { if (it.key == selectedSiteKey || it.api == selectedSiteKey) 1 else 0 }
+                    .thenByDescending { mainlandSiteScore(it) }
+                    .thenByDescending { scoreMap[it.api] ?: 0 }
+                    .thenBy { it.name }
+            )
+    }
+
+    private fun mainlandSiteScore(site: Site): Int {
+        val raw = "${site.name} ${site.key.orEmpty()} ${site.api}".lowercase()
+        var score = 0
+        val fastHints = listOf(
+            "lzi", "1080", "uku", "wujin", "yaya", "guangsu", "wolong", "rycj", "xinlang",
+            "wwzy", "ffzy", "dbzy", "subo", "jyzy", "suoni", "heimuer", "api.php", "provide/vod"
+        )
+        fastHints.forEachIndexed { index, hint ->
+            if (raw.contains(hint)) score += 50 - index.coerceAtMost(40)
+        }
+        if (raw.contains(".cn") || raw.contains(".com.cn")) score += 30
+        if (raw.contains(".cc") || raw.contains(".tv") || raw.contains(".me") || raw.contains(".hk")) score += 12
+        if (raw.contains("github") || raw.contains("raw.githubusercontent") || raw.contains("imdb") || raw.contains("rottentomatoes")) {
+            score -= 100
+        }
+        return score
     }
 
     private fun loadSiteScores(): Map<String, Int> {

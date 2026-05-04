@@ -1,7 +1,8 @@
 package com.example.myapplicationlibretv.data.api
 
-import com.example.myapplicationlibretv.BuildConfig
 import com.jakewharton.retrofit2.converter.kotlinx.serialization.asConverterFactory
+import com.example.myapplicationlibretv.BuildConfig
+import java.io.File
 import kotlinx.serialization.json.Json
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -14,7 +15,9 @@ object RetrofitClient {
     }
     
     private val okHttpClient: OkHttpClient by lazy {
-        val cacheDir = java.io.File("/data/user/0/${BuildConfig.APPLICATION_ID}/cache/http_cache")
+        val cacheRoot = System.getProperty("java.io.tmpdir").orEmpty()
+        val cacheDir = cacheRoot.takeIf { it.isNotBlank() }
+            ?.let { File(it, "${BuildConfig.APPLICATION_ID}_http_cache") }
         NetworkTuning.createTunedClient(
             cacheDirectory = cacheDir,
             trustAllSsl = true,
