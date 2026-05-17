@@ -1526,6 +1526,8 @@ private fun DownloadCompletedRow(
     onPlayInApp: () -> Unit,
     onDelete: () -> Unit
 ) {
+    val fullTitle = task.title.trim().ifBlank { "已下载视频" }
+    val episodeName = inferDownloadEpisodeName(fullTitle)
     Surface(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(8.dp),
@@ -1538,13 +1540,24 @@ private fun DownloadCompletedRow(
                 .padding(start = 12.dp, top = 6.dp, bottom = 6.dp, end = 4.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text(
-                text = inferDownloadEpisodeName(task.title),
-                style = MaterialTheme.typography.bodyMedium,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f)
-            )
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = fullTitle,
+                    style = MaterialTheme.typography.bodyMedium,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+                if (episodeName != fullTitle) {
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                        text = episodeName,
+                        style = MaterialTheme.typography.bodySmall,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
             IconButton(onClick = onDelete) {
                 Icon(Icons.Default.Delete, contentDescription = "删除下载")
             }
