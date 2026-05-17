@@ -1,4 +1,5 @@
 import java.util.Properties
+import org.gradle.api.tasks.Copy
 
 plugins {
     alias(libs.plugins.android.application)
@@ -29,8 +30,8 @@ android {
         applicationId = "com.example.myapplicationlibretv"
         minSdk = 24
         targetSdk = 35
-        versionCode = 83
-        versionName = "1.8.3"
+        versionCode = 92
+        versionName = "1.8.12"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -128,4 +129,23 @@ dependencies {
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)
     debugImplementation(libs.androidx.compose.ui.tooling)
     debugImplementation(libs.androidx.compose.ui.test.manifest)
+}
+
+// 自动打包并复制到桌面的 Gradle 任务
+tasks.register<Copy>("copyReleaseApkToDesktop") {
+    group = "build"
+    description = "编译并复制发布版 APK 到桌面"
+    
+    val desktopPath = System.getProperty("user.home") + "/Desktop"
+    
+    // 确保在编译完成后执行
+    dependsOn("assembleRelease")
+    
+    from("build/outputs/apk/release/app-release.apk")
+    into(desktopPath)
+    rename { "枫林晚TV-v${android.defaultConfig.versionName}.apk" }
+    
+    doLast {
+        println("✅ 打包成功！文件已保存至桌面：$desktopPath")
+    }
 }

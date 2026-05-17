@@ -1,5 +1,7 @@
-package com.example.myapplicationlibretv.ui.detail
+﻿package com.example.myapplicationlibretv.ui.detail
 
+import android.content.Context
+import android.content.SharedPreferences
 import androidx.compose.animation.*
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
@@ -44,6 +46,7 @@ import com.example.myapplicationlibretv.download.BackgroundDownloadService
 import com.example.myapplicationlibretv.utils.LocalProxyServer
 import kotlinx.serialization.Serializable
 import kotlinx.coroutines.async
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -130,7 +133,7 @@ class DetailViewModel(context: android.app.Application) : androidx.lifecycle.And
                 val baseVideo = initialMerged.firstOrNull()?.video
                 val initialSources = initialMerged.flatMap { result ->
                     parseSources(result.video.playFrom, result.video.playUrl).map { source ->
-                        source.copy(name = "${result.site.name} 路 ${source.name}")
+                        source.copy(name = "${result.site.name} 璺?${source.name}")
                     }
                 }
                 _videoDetail.value = baseVideo
@@ -156,7 +159,7 @@ class DetailViewModel(context: android.app.Application) : androidx.lifecycle.And
                 val finalVideo = baseVideo ?: mergedResults.firstOrNull()?.video
                 val finalSources = mergedResults.flatMap { result ->
                     parseSources(result.video.playFrom, result.video.playUrl).map { source ->
-                        source.copy(name = "${result.site.name} 路 ${source.name}")
+                        source.copy(name = "${result.site.name} 璺?${source.name}")
                     }
                 }
                 if (finalVideo != null || finalSources.isNotEmpty()) {
@@ -306,12 +309,12 @@ class DetailViewModel(context: android.app.Application) : androidx.lifecycle.And
 
     private fun stripDetailTitleNoise(value: String): String {
         return value
-            .replace("国语", "")
-            .replace("粤语", "")
-            .replace("普通话", "")
-            .replace("高清", "")
-            .replace("蓝光", "")
-            .replace("全集", "")
+            .replace("鍥借", "")
+            .replace("绮よ", "")
+            .replace("鏅€氳瘽", "")
+            .replace("楂樻竻", "")
+            .replace("钃濆厜", "")
+            .replace("鍏ㄩ泦", "")
             .replace("完整版", "")
             .replace("版", "")
     }
@@ -336,9 +339,20 @@ fun VideoDetailScreen(
     var selectedSourceIndex by remember { mutableIntStateOf(0) }
     var showDownloadSheet by remember { mutableStateOf(false) }
     var downloadToast by remember { mutableStateOf<String?>(null) }
+    var progressRefreshTick by remember { mutableIntStateOf(0) }
+    val progressPrefs = remember(context) {
+        context.applicationContext.getSharedPreferences("player_progress", Context.MODE_PRIVATE)
+    }
 
     LaunchedEffect(siteKey, videoId, videoTitle) {
         viewModel.fetchDetail(siteKey, videoId, videoTitle)
+    }
+
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(3_000)
+            progressRefreshTick += 1
+        }
     }
 
     Scaffold(
@@ -389,7 +403,8 @@ fun VideoDetailScreen(
                             availableWidth >= 400.dp -> 128.dp
                             else -> (availableWidth * 0.32f).coerceIn(92.dp, 112.dp)
                         }
-                        val actionsBesidePoster = availableWidth >= 640.dp
+                        val stackedHeaderLayout = availableWidth < 430.dp
+                        val actionsBesidePoster = availableWidth >= 700.dp
                         val synopsisLines = when {
                             availableWidth >= 900.dp -> 9
                             availableWidth >= 640.dp -> 7
@@ -400,20 +415,17 @@ fun VideoDetailScreen(
                         Column(
                             modifier = Modifier.padding(horizontal = sidePadding, vertical = 12.dp)
                         ) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                verticalAlignment = Alignment.Top
-                            ) {
-                                AsyncImage(
-                                    model = item.pic,
-                                    contentDescription = item.name,
-                                    modifier = Modifier
-                                        .width(posterWidth)
-                                        .aspectRatio(0.7f),
-                                    contentScale = ContentScale.Crop
-                                )
-                                Spacer(modifier = Modifier.width(if (availableWidth >= 520.dp) 16.dp else 12.dp))
-                                Column(modifier = Modifier.weight(1f)) {
+                            if (stackedHeaderLayout) {
+                                Column(modifier = Modifier.fillMaxWidth()) {
+                                    AsyncImage(
+                                        model = item.pic,
+                                        contentDescription = item.name,
+                                        modifier = Modifier
+                                            .width(posterWidth)
+                                            .aspectRatio(0.7f),
+                                        contentScale = ContentScale.Crop
+                                    )
+                                    Spacer(modifier = Modifier.height(12.dp))
                                     DetailHeaderText(
                                         item = item,
                                         sourceCount = sources.size
@@ -423,17 +435,43 @@ fun VideoDetailScreen(
                                         content = item.content,
                                         maxLines = synopsisLines
                                     )
-                                    if (actionsBesidePoster) {
-                                        Spacer(modifier = Modifier.height(12.dp))
-                                        DetailPlayButton(
+                                }
+                            } else {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.Top
+                                ) {
+                                    AsyncImage(
+                                        model = item.pic,
+                                        contentDescription = item.name,
+                                        modifier = Modifier
+                                            .width(posterWidth)
+                                            .aspectRatio(0.7f),
+                                        contentScale = ContentScale.Crop
+                                    )
+                                    Spacer(modifier = Modifier.width(if (availableWidth >= 520.dp) 16.dp else 12.dp))
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        DetailHeaderText(
                                             item = item,
-                                            sources = sources,
-                                            selectedSourceIndex = selectedSourceIndex,
-                                            videoId = videoId,
-                                            viewModel = viewModel,
-                                            onPlayClick = onPlayClick,
-                                            onDownloadClick = { showDownloadSheet = true }
+                                            sourceCount = sources.size
                                         )
+                                        Spacer(modifier = Modifier.height(10.dp))
+                                        DetailSynopsis(
+                                            content = item.content,
+                                            maxLines = synopsisLines
+                                        )
+                                        if (actionsBesidePoster) {
+                                            Spacer(modifier = Modifier.height(12.dp))
+                                            DetailPlayButton(
+                                                item = item,
+                                                sources = sources,
+                                                selectedSourceIndex = selectedSourceIndex,
+                                                videoId = videoId,
+                                                viewModel = viewModel,
+                                                onPlayClick = onPlayClick,
+                                                onDownloadClick = { showDownloadSheet = true }
+                                            )
+                                        }
                                     }
                                 }
                             }
@@ -487,14 +525,27 @@ fun VideoDetailScreen(
                                 maxWidth >= 700.dp -> 24.dp
                                 else -> 16.dp
                             }
+                            val episodeMinCell = when {
+                                maxWidth >= 900.dp -> 112.dp
+                                maxWidth >= 640.dp -> 100.dp
+                                maxWidth >= 420.dp -> 92.dp
+                                else -> 84.dp
+                            }
                             LazyVerticalGrid(
-                                columns = GridCells.Adaptive(minSize = 100.dp),
+                                columns = GridCells.Adaptive(minSize = episodeMinCell),
                                 contentPadding = PaddingValues(horizontal = sidePadding, vertical = 16.dp),
                                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                                 verticalArrangement = Arrangement.spacedBy(8.dp),
                                 modifier = Modifier.fillMaxSize()
                             ) {
                                 items(episodes) { episode ->
+                                    val playerTitle = buildPlayerTitle(item.name, episode.name)
+                                    val episodeProgress = readEpisodeWatchProgress(
+                                        prefs = progressPrefs,
+                                        videoId = videoId,
+                                        playerTitle = playerTitle,
+                                        refreshTick = progressRefreshTick
+                                    )
                                     OutlinedButton(
                                         onClick = {
                                             val episodePayload = buildPlayerEpisodesPayload(
@@ -511,7 +562,7 @@ fun VideoDetailScreen(
                                             viewModel.addToHistory()
                                             onPlayClick(
                                                 videoId,
-                                                buildPlayerTitle(item.name, episode.name),
+                                                playerTitle,
                                                 playlist.joinToString("\n"),
                                                 episodePayload,
                                                 episodeIndex.coerceAtLeast(0)
@@ -520,12 +571,23 @@ fun VideoDetailScreen(
                                         contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
                                         shape = MaterialTheme.shapes.small
                                     ) {
-                                        Text(
-                                            text = episode.name,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis,
-                                            style = MaterialTheme.typography.bodySmall
-                                        )
+                                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                            Text(
+                                                text = episode.name,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                                style = MaterialTheme.typography.bodySmall
+                                            )
+                                            if (episodeProgress != null) {
+                                                Spacer(modifier = Modifier.height(4.dp))
+                                                LinearProgressIndicator(
+                                                    progress = { episodeProgress },
+                                                    modifier = Modifier
+                                                        .fillMaxWidth()
+                                                        .height(3.dp)
+                                                )
+                                            }
+                                        }
                                     }
                                 }
 
@@ -554,7 +616,7 @@ fun VideoDetailScreen(
                             rawUrl = playlist.joinToString("\n"),
                             title = buildPlayerTitle(item.name, episode.name)
                         )
-                        downloadToast = "已加入下载：${episode.name}"
+                        downloadToast = "宸插姞鍏ヤ笅杞斤細${episode.name}"
                     }
                     showDownloadSheet = false
                 },
@@ -650,45 +712,78 @@ private fun DetailPlayButton(
     onPlayClick: (Int, String, String, List<PlayerEpisodePayload>, Int) -> Unit,
     onDownloadClick: () -> Unit
 ) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
-    ) {
-        Button(
-            onClick = {
-                sources.getOrNull(selectedSourceIndex)?.episodes?.firstOrNull()?.let {
-                    val episodePayload = buildPlayerEpisodesPayload(
-                        sources = sources,
-                        selectedSourceIndex = selectedSourceIndex,
-                        videoName = item.name
-                    )
-                    val playlist = collectFailoverUrls(
-                        sources = sources,
-                        selectedSourceIndex = selectedSourceIndex,
-                        episodeName = it.name
-                    )
-                    viewModel.addToHistory()
-                    onPlayClick(
-                        videoId,
-                        buildPlayerTitle(item.name, it.name),
-                        playlist.joinToString("\n"),
-                        episodePayload,
-                        0
-                    )
-                }
-            },
-            modifier = Modifier.weight(1f).heightIn(min = 48.dp)
-        ) {
-            Icon(Icons.Default.PlayArrow, contentDescription = null)
-            Text("立即播放")
+    BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+        val compactButtons = maxWidth < 380.dp
+        val playAction: () -> Unit = {
+            sources.getOrNull(selectedSourceIndex)?.episodes?.firstOrNull()?.let {
+                val episodePayload = buildPlayerEpisodesPayload(
+                    sources = sources,
+                    selectedSourceIndex = selectedSourceIndex,
+                    videoName = item.name
+                )
+                val playlist = collectFailoverUrls(
+                    sources = sources,
+                    selectedSourceIndex = selectedSourceIndex,
+                    episodeName = it.name
+                )
+                viewModel.addToHistory()
+                onPlayClick(
+                    videoId,
+                    buildPlayerTitle(item.name, it.name),
+                    playlist.joinToString("\n"),
+                    episodePayload,
+                    0
+                )
+            }
+            Unit
         }
-        OutlinedButton(
-            onClick = onDownloadClick,
-            enabled = sources.getOrNull(selectedSourceIndex)?.episodes?.isNotEmpty() == true,
-            modifier = Modifier.weight(1f).heightIn(min = 48.dp)
-        ) {
-            Icon(Icons.Default.Download, contentDescription = null)
-            Text("下载")
+
+        if (compactButtons) {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Button(
+                    onClick = playAction,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 48.dp)
+                ) {
+                    Icon(Icons.Default.PlayArrow, contentDescription = null)
+                    Text("立即播放")
+                }
+                OutlinedButton(
+                    onClick = onDownloadClick,
+                    enabled = sources.getOrNull(selectedSourceIndex)?.episodes?.isNotEmpty() == true,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 48.dp)
+                ) {
+                    Icon(Icons.Default.Download, contentDescription = null)
+                    Text("下载")
+                }
+            }
+        } else {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Button(
+                    onClick = playAction,
+                    modifier = Modifier.weight(1f).heightIn(min = 48.dp)
+                ) {
+                    Icon(Icons.Default.PlayArrow, contentDescription = null)
+                    Text("立即播放")
+                }
+                OutlinedButton(
+                    onClick = onDownloadClick,
+                    enabled = sources.getOrNull(selectedSourceIndex)?.episodes?.isNotEmpty() == true,
+                    modifier = Modifier.weight(1f).heightIn(min = 48.dp)
+                ) {
+                    Icon(Icons.Default.Download, contentDescription = null)
+                    Text("下载")
+                }
+            }
         }
     }
 }
@@ -863,27 +958,50 @@ data class PlayerEpisodePayload(val name: String, val title: String, val playlis
 
 private fun buildPlayerTitle(videoName: String, episodeName: String): String {
     val cleanedEpisode = episodeName.trim()
-    return if (cleanedEpisode.isBlank() || cleanedEpisode == "播放") {
+    return if (cleanedEpisode.isBlank() || cleanedEpisode == "鎾斁") {
         videoName
     } else {
-        "$videoName · $cleanedEpisode"
+        "$videoName 路 $cleanedEpisode"
     }
+}
+
+private fun readEpisodeWatchProgress(
+    prefs: SharedPreferences,
+    videoId: Int,
+    playerTitle: String,
+    refreshTick: Int
+): Float? {
+    @Suppress("UNUSED_VARIABLE")
+    val tick = refreshTick
+    val key = buildProgressKey(videoId, playerTitle)
+    val progress = prefs.getLong(key, 0L)
+    if (progress <= 0L) return null
+    val duration = prefs.getLong("${key}_duration", 0L)
+    return if (duration > 0L) {
+        (progress.toFloat() / duration.toFloat()).coerceIn(0.03f, 0.98f)
+    } else {
+        0.06f
+    }
+}
+
+private fun buildProgressKey(videoId: Int, displayTitle: String): String {
+    return "progress_${videoId}_${displayTitle.trim().ifBlank { "default" }}"
 }
 
 fun parseSources(playFrom: String?, playUrl: String?): List<PlaySource> {
     if (playUrl.isNullOrEmpty()) return emptyList()
     
-    val fromNames = playFrom?.split("\$\$\$") ?: listOf("默认线路")
+    val fromNames = playFrom?.split("\$\$\$") ?: listOf("榛樿绾胯矾")
     val urlGroups = playUrl.split("\$\$\$")
     
     return urlGroups.mapIndexedNotNull { index, urlGroup ->
-        val name = fromNames.getOrNull(index) ?: "线路${index + 1}"
+        val name = fromNames.getOrNull(index) ?: "绾胯矾${index + 1}"
         val episodes = urlGroup.split("#").mapNotNull { epStr ->
             val parts = epStr.split("\$", limit = 2)
             if (parts.size >= 2) {
                 Episode(name = parts[0], url = parts[1])
             } else if (parts.isNotEmpty() && parts[0].isNotBlank()) {
-                Episode(name = "播放", url = parts[0])
+                Episode(name = "鎾斁", url = parts[0])
             } else null
         }
         if (episodes.isNotEmpty()) PlaySource(name, episodes) else null
@@ -935,3 +1053,4 @@ private fun buildPlayerEpisodesPayload(
         )
     }
 }
+

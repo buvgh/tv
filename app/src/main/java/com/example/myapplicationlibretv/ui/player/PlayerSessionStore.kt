@@ -5,7 +5,8 @@ import java.util.concurrent.ConcurrentHashMap
 
 data class PlayerSession(
     val episodes: List<PlayerEpisodePayload>,
-    val currentEpisodeIndex: Int
+    val currentEpisodeIndex: Int,
+    val historyRecordId: Int = 0
 )
 
 object PlayerSessionStore {

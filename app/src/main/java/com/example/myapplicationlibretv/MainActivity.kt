@@ -79,7 +79,8 @@ fun AppNavigation(
                     val sessionId = PlayerSessionStore.put(
                         PlayerSession(
                             episodes = episodes,
-                            currentEpisodeIndex = currentEpisodeIndex
+                            currentEpisodeIndex = currentEpisodeIndex,
+                            historyRecordId = 0
                         )
                     )
                     navController.navigate("player/0/$encodedTitle/$encodedUri?session=$sessionId")
@@ -107,7 +108,8 @@ fun AppNavigation(
                     val sessionId = PlayerSessionStore.put(
                         PlayerSession(
                             episodes = episodes,
-                            currentEpisodeIndex = currentEpisodeIndex
+                            currentEpisodeIndex = currentEpisodeIndex,
+                            historyRecordId = buildSavedRecordId(siteKey, playVideoId)
                         )
                     )
                     navController.navigate(
@@ -131,13 +133,15 @@ fun AppNavigation(
                 videoUrl = videoUrl,
                 episodes = session?.episodes.orEmpty(),
                 currentEpisodeIndex = session?.currentEpisodeIndex ?: 0,
+                historyRecordId = session?.historyRecordId ?: 0,
                 onPlayNext = { nextTitle, nextPlaylist, nextIndex ->
                     val encodedTitle = URLEncoder.encode(nextTitle, StandardCharsets.UTF_8.toString())
                     val encodedUrl = URLEncoder.encode(nextPlaylist, StandardCharsets.UTF_8.toString())
                     val nextSessionId = PlayerSessionStore.put(
                         PlayerSession(
                             episodes = session?.episodes.orEmpty(),
-                            currentEpisodeIndex = nextIndex
+                            currentEpisodeIndex = nextIndex,
+                            historyRecordId = session?.historyRecordId ?: 0
                         )
                     )
                     navController.navigate(
@@ -152,4 +156,8 @@ fun AppNavigation(
             )
         }
     }
+}
+
+private fun buildSavedRecordId(siteKey: String, sourceVideoId: Int): Int {
+    return "$siteKey#$sourceVideoId".hashCode()
 }

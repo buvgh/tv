@@ -30,13 +30,18 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.Lifecycle
@@ -62,6 +67,7 @@ import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.common.util.Log
 import androidx.media3.ui.AspectRatioFrameLayout
 import com.example.myapplicationlibretv.data.api.NetworkTuning
+import com.example.myapplicationlibretv.data.db.AppDatabase
 import com.example.myapplicationlibretv.download.BackgroundDownloadService
 import com.example.myapplicationlibretv.download.DownloadCenter
 import com.example.myapplicationlibretv.download.parseVideoUrl
@@ -93,6 +99,7 @@ fun PlayerScreen(
     videoUrl: String,
     episodes: List<PlayerEpisodePayload> = emptyList(),
     currentEpisodeIndex: Int = 0,
+    historyRecordId: Int = 0,
     onPlayNext: (String, String, Int) -> Unit = { _, _, _ -> },
     onBack: () -> Unit
 ) {
@@ -102,8 +109,12 @@ fun PlayerScreen(
     val progressPrefs = remember(context) {
         context.applicationContext.getSharedPreferences("player_progress", Context.MODE_PRIVATE)
     }
+    val videoDao = remember(context) {
+        AppDatabase.getDatabase(context.applicationContext).videoDao()
+    }
     var errorMessage by remember { mutableStateOf<String?>(null) }
     var isControllerVisible by remember { mutableStateOf(true) }
+    var controllerEnabled by remember { mutableStateOf(true) }
     var resizeModeIndex by remember { mutableIntStateOf(0) }
     var toastMessage by remember { mutableStateOf<String?>(null) }
     var audioInfo by remember { mutableStateOf<String?>(null) }
@@ -298,6 +309,10 @@ fun PlayerScreen(
     var gestureMode by remember { mutableIntStateOf(0) }
     var manualOrientation by remember { mutableIntStateOf(ActivityInfo.SCREEN_ORIENTATION_USER_PORTRAIT) }
     var physicalOrientationDegrees by remember { mutableIntStateOf(OrientationEventListener.ORIENTATION_UNKNOWN) }
+    var zoomScale by remember { mutableFloatStateOf(1f) }
+    var zoomOffset by remember { mutableStateOf(Offset.Zero) }
+    var playerViewportSize by remember { mutableStateOf(IntSize.Zero) }
+    var suppressSingleFingerUntil by remember { mutableLongStateOf(0L) }
     val dragThresholdPx = with(LocalDensity.current) { 18.dp.toPx() }
     val ratioModes = remember {
         listOf(
@@ -307,6 +322,72 @@ fun PlayerScreen(
         )
     }
     // 播放器只支持手动横竖屏切换，不跟随传感器自动旋转。
+    fun maxZoomOffset(scale: Float): Offset {
+        if (playerViewportSize == IntSize.Zero || scale <= 1f) return Offset.Zero
+        val maxX = (playerViewportSize.width * (scale - 1f)) / 2f
+        val maxY = (playerViewportSize.height * (scale - 1f)) / 2f
+        return Offset(maxX, maxY)
+    }
+
+    fun clampZoomOffset(scale: Float, offset: Offset): Offset {
+        val maxOffset = maxZoomOffset(scale)
+        return Offset(
+            x = offset.x.coerceIn(-maxOffset.x, maxOffset.x),
+            y = offset.y.coerceIn(-maxOffset.y, maxOffset.y)
+        )
+    }
+
+    fun syncZoomTransform() {
+        val playerView = playerViewRef ?: return
+        val contentFrameId = playerView.context.resources.getIdentifier(
+            "exo_content_frame",
+            "id",
+            "androidx.media3.ui"
+        )
+        val contentFrame = playerView.findViewById<View?>(contentFrameId)
+            ?: playerView.getChildAt(0)
+            ?: return
+        contentFrame.pivotX = contentFrame.width / 2f
+        contentFrame.pivotY = contentFrame.height / 2f
+        contentFrame.scaleX = zoomScale
+        contentFrame.scaleY = zoomScale
+        contentFrame.translationX = zoomOffset.x
+        contentFrame.translationY = zoomOffset.y
+    }
+
+    fun resetZoom() {
+        zoomScale = 1f
+        zoomOffset = Offset.Zero
+        syncZoomTransform()
+    }
+
+    fun suppressSingleFingerGestures(durationMs: Long = 180L) {
+        suppressSingleFingerUntil = System.currentTimeMillis() + durationMs
+    }
+
+    fun shouldSuppressSingleFingerGestures(): Boolean {
+        return System.currentTimeMillis() < suppressSingleFingerUntil
+    }
+
+    fun applyZoomPan(pan: Offset = Offset.Zero, zoomChange: Float = 1f) {
+        suppressSingleFingerGestures()
+        val newScale = (zoomScale * zoomChange).coerceIn(1f, 4f)
+        if (newScale <= 1.01f) {
+            resetZoom()
+            return
+        }
+        zoomScale = newScale
+        zoomOffset = clampZoomOffset(newScale, zoomOffset + pan)
+        showSeekOverlay = false
+        showBrightnessOverlay = false
+        showVolumeOverlay = false
+        syncZoomTransform()
+    }
+
+    LaunchedEffect(videoId, displayTitle, videoUrl, currentIndex, reloadToken) {
+        resetZoom()
+    }
+
     DisposableEffect(context) {
         val listener = object : OrientationEventListener(context.applicationContext) {
             override fun onOrientationChanged(orientation: Int) {
@@ -465,7 +546,7 @@ fun PlayerScreen(
                         )
                     }
 
-                    override fun onPlaybackStateChanged(playbackState: Int) {
+override fun onPlaybackStateChanged(playbackState: Int) {
                         if (playbackState == Player.STATE_READY) {
                             playbackReady = true
                             isAutoSwitching = false
@@ -605,6 +686,24 @@ fun PlayerScreen(
         )
     }
 
+    fun applyVideoSurfaceTransform(playerView: PlayerView?) {
+        if (playerView == null) return
+        val contentFrameId = playerView.context.resources.getIdentifier(
+            "exo_content_frame",
+            "id",
+            "androidx.media3.ui"
+        )
+        val contentFrame = playerView.findViewById<View?>(contentFrameId)
+            ?: playerView.getChildAt(0)
+            ?: return
+        contentFrame.pivotX = contentFrame.width / 2f
+        contentFrame.pivotY = contentFrame.height / 2f
+        contentFrame.scaleX = zoomScale
+        contentFrame.scaleY = zoomScale
+        contentFrame.translationX = zoomOffset.x
+        contentFrame.translationY = zoomOffset.y
+    }
+
     DisposableEffect(activity, exoPlayer) {
         val action: () -> Unit = { enterPipAction.value() }
         PlayerPipController.attach(action)
@@ -686,6 +785,12 @@ fun PlayerScreen(
             val progress = exoPlayer.currentPosition.coerceAtLeast(0L)
             if (progress <= 0L) continue
             saveEpisodeProgress(progressPrefs, progressKey, progress, duration)
+            if (historyRecordId != 0) {
+                val normalized = normalizeProgress(progress, duration)
+                withContext(Dispatchers.IO) {
+                    videoDao.updateHistoryProgress(historyRecordId, normalized, duration)
+                }
+            }
         }
     }
 
@@ -693,9 +798,12 @@ fun PlayerScreen(
         modifier = Modifier
             .fillMaxSize()
             .background(Color.Black)
-            .pointerInput(exoPlayer) {
+            .onSizeChanged { playerViewportSize = it }
+            .pointerInput(exoPlayer, isControllerVisible) {
                 detectDragGestures(
                     onDragStart = {
+                        if (!isControllerVisible) return@detectDragGestures
+                        if (shouldSuppressSingleFingerGestures()) return@detectDragGestures
                         dragAccumulatorX = 0f
                         dragAccumulatorY = 0f
                         gestureMode = 0
@@ -703,10 +811,10 @@ fun PlayerScreen(
                         volume = lastAppliedStreamVolume.toFloat() / maxMusicVolume
                         dragStartVolume = volume
                         showSeekOverlay = false
-                        playerViewRef?.showController()
-                        isControllerVisible = true
                     },
                     onDragEnd = {
+                        if (!isControllerVisible) return@detectDragGestures
+                        if (shouldSuppressSingleFingerGestures()) return@detectDragGestures
                         showBrightnessOverlay = false
                         showVolumeOverlay = false
                         if (showSeekOverlay && exoPlayer != null) {
@@ -723,6 +831,12 @@ fun PlayerScreen(
                     },
                     onDrag = { change, dragAmount ->
                         change.consume()
+                        if (!isControllerVisible) {
+                            return@detectDragGestures
+                        }
+                        if (shouldSuppressSingleFingerGestures()) {
+                            return@detectDragGestures
+                        }
                         dragAccumulatorX += dragAmount.x
                         dragAccumulatorY += dragAmount.y
 
@@ -803,12 +917,14 @@ fun PlayerScreen(
             factory = { ctx ->
                 PlayerView(ctx).apply {
                     player = controllerPlayer
-                    useController = true
+                    useController = controllerEnabled
                     setControllerShowTimeoutMs(5000)
                     setShowNextButton(!isLocalPlayback && nextEpisode != null)
                     setControllerVisibilityListener(
                         PlayerView.ControllerVisibilityListener { visibility ->
-                            isControllerVisible = (visibility == View.VISIBLE)
+                            val visible = visibility == View.VISIBLE
+                            isControllerVisible = visible
+                            controllerEnabled = visible
                             post { bindNextButton(this) }
                         }
                     )
@@ -818,21 +934,135 @@ fun PlayerScreen(
                     )
                     keepScreenOn = shouldKeepScreenOn
                     playerViewRef = this
-                    post { bindNextButton(this) }
+                    post {
+                        bindNextButton(this)
+                        applyVideoSurfaceTransform(this)
+                    }
                 }
             },
             update = { view ->
                 if (view.player !== controllerPlayer) {
                     view.player = controllerPlayer
                 }
+                view.useController = controllerEnabled
                 view.resizeMode = ratioModes[resizeModeIndex].first
                 view.setControllerShowTimeoutMs(5000)
                 view.setShowNextButton(!isLocalPlayback && nextEpisode != null)
-                view.post { bindNextButton(view) }
+                view.post {
+                    bindNextButton(view)
+                    applyVideoSurfaceTransform(view)
+                }
                 view.keepScreenOn = shouldKeepScreenOn
             },
             modifier = Modifier.fillMaxSize()
         )
+
+        if (!isControllerVisible) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .pointerInput(playerViewportSize) {
+                        detectTransformGestures { _, pan, zoom, _ ->
+                            applyZoomPan(pan = pan, zoomChange = zoom)
+                        }
+                    }
+                    .pointerInput(playerViewRef) {
+                        detectTapGestures(
+                            onDoubleTap = {
+                                if (zoomScale > 1.01f) {
+                                    resetZoom()
+                                }
+                            },
+                            onTap = {
+                                controllerEnabled = true
+                                playerViewRef?.useController = true
+                                playerViewRef?.showController()
+                            }
+                        )
+                    }
+                    .pointerInput(exoPlayer) {
+                        detectDragGestures(
+                            onDragStart = {
+                                if (shouldSuppressSingleFingerGestures()) return@detectDragGestures
+                                dragAccumulatorX = 0f
+                                dragAccumulatorY = 0f
+                                gestureMode = 0
+                                lastAppliedStreamVolume = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
+                                volume = lastAppliedStreamVolume.toFloat() / maxMusicVolume
+                                dragStartVolume = volume
+                                showSeekOverlay = false
+                            },
+                            onDragEnd = {
+                                if (shouldSuppressSingleFingerGestures()) return@detectDragGestures
+                                showBrightnessOverlay = false
+                                showVolumeOverlay = false
+                                if (showSeekOverlay && exoPlayer != null) {
+                                    val duration = exoPlayer.duration
+                                    val safeTarget = if (duration > 0) {
+                                        seekTargetMs.coerceIn(0L, duration)
+                                    } else {
+                                        seekTargetMs.coerceAtLeast(0L)
+                                    }
+                                    exoPlayer.seekTo(safeTarget)
+                                    showSeekOverlay = false
+                                }
+                            },
+                            onDragCancel = {
+                                showSeekOverlay = false
+                                showBrightnessOverlay = false
+                                showVolumeOverlay = false
+                            },
+                            onDrag = { change, dragAmount ->
+                                change.consume()
+                                if (shouldSuppressSingleFingerGestures()) {
+                                    return@detectDragGestures
+                                }
+                                if (zoomScale > 1.01f) {
+                                    applyZoomPan(pan = dragAmount, zoomChange = 1f)
+                                    return@detectDragGestures
+                                }
+                                dragAccumulatorX += dragAmount.x
+                                dragAccumulatorY += dragAmount.y
+
+                                if (gestureMode == 0 && exoPlayer != null) {
+                                    val absX = abs(dragAccumulatorX)
+                                    val absY = abs(dragAccumulatorY)
+                                    if (absX >= dragThresholdPx && absX > absY) {
+                                        gestureMode = 3
+                                        seekStartMs = exoPlayer.currentPosition
+                                        seekTargetMs = seekStartMs
+                                        showSeekOverlay = true
+                                        showBrightnessOverlay = false
+                                        showVolumeOverlay = false
+                                    } else {
+                                        return@detectDragGestures
+                                    }
+                                }
+
+                                when (gestureMode) {
+                                    3 -> {
+                                        val width = size.width.toFloat().coerceAtLeast(1f)
+                                        val maxDeltaMs = 10 * 60 * 1000L
+                                        val fullSwipeMs = 5 * 60 * 1000L
+                                        val deltaMs = ((dragAccumulatorX / width) * fullSwipeMs.toFloat()).toLong()
+                                            .coerceIn(-maxDeltaMs, maxDeltaMs)
+                                        val duration = exoPlayer?.duration ?: 0L
+                                        val target = seekStartMs + deltaMs
+                                        seekTargetMs = if (duration > 0) {
+                                            target.coerceIn(0L, duration)
+                                        } else {
+                                            target.coerceAtLeast(0L)
+                                        }
+                                        showSeekOverlay = true
+                                        showBrightnessOverlay = false
+                                        showVolumeOverlay = false
+                                    }
+                                }
+                            }
+                        )
+                    }
+            )
+        }
 
         // 顶部控制与标题
         if (isControllerVisible || errorMessage != null) {
@@ -1219,7 +1449,10 @@ private fun saveEpisodeProgress(
     progress: Long,
     duration: Long
 ) {
-    prefs.edit().putLong(key, normalizeProgress(progress, duration)).apply()
+    prefs.edit()
+        .putLong(key, normalizeProgress(progress, duration))
+        .putLong("${key}_duration", duration.coerceAtLeast(0L))
+        .apply()
 }
 
 private fun shouldUseLocalProxy(url: String, isLocalPlayback: Boolean): Boolean {

@@ -2,6 +2,7 @@ package com.example.myapplicationlibretv.download
 
 import android.content.ContentUris
 import android.content.Context
+import android.media.MediaScannerConnection
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
@@ -293,33 +294,84 @@ object DownloadCenter {
                 }
             }.getOrDefault(false)
         }
-        if (!deleted) {
-            deleted = deleteFromMediaStoreByName(context, fileName)
+        deleted = deleteFromMediaStoreByName(context, fileName, title) || deleted
+        val deletedLocalPath = deleteFromLocalDownloadsByName(context, fileName, title)
+        if (!deleted && deletedLocalPath == null) {
+            return
         }
-        if (!deleted) {
-            deleteFromLocalDownloadsByName(context, fileName, title)
+        deletedLocalPath?.let { deletedPath ->
+            runCatching {
+                MediaScannerConnection.scanFile(context, arrayOf(deletedPath), null, null)
+            }
         }
     }
 
-    private fun deleteFromMediaStoreByName(context: Context, fileName: String?): Boolean {
-        if (fileName.isNullOrBlank() || Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return false
-        val projection = arrayOf(MediaStore.Downloads._ID, MediaStore.Downloads.DISPLAY_NAME)
-        val selection = "${MediaStore.Downloads.DISPLAY_NAME} = ?"
+    private fun deleteFromMediaStoreByName(context: Context, fileName: String?, title: String): Boolean {
+        if (fileName.isNullOrBlank()) return false
+        val relativePaths = buildRelativePathCandidates(title)
+        var deleted = false
+        deleted = deleteFromCollectionByName(
+            context = context,
+            collectionUri = MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+            idColumn = MediaStore.Downloads._ID,
+            nameColumn = MediaStore.Downloads.DISPLAY_NAME,
+            fileName = fileName,
+            relativePaths = relativePaths
+        ) || deleted
+        deleted = deleteFromCollectionByName(
+            context = context,
+            collectionUri = MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
+            idColumn = MediaStore.Video.Media._ID,
+            nameColumn = MediaStore.Video.Media.DISPLAY_NAME,
+            fileName = fileName,
+            relativePaths = relativePaths
+        ) || deleted
+        deleted = deleteFromCollectionByName(
+            context = context,
+            collectionUri = MediaStore.Files.getContentUri("external"),
+            idColumn = MediaStore.Files.FileColumns._ID,
+            nameColumn = MediaStore.Files.FileColumns.DISPLAY_NAME,
+            fileName = fileName,
+            relativePaths = relativePaths
+        ) || deleted
+        return deleted
+    }
+
+    private fun deleteFromCollectionByName(
+        context: Context,
+        collectionUri: Uri,
+        idColumn: String,
+        nameColumn: String,
+        fileName: String,
+        relativePaths: List<String>
+    ): Boolean {
+        val projection = mutableListOf(idColumn, nameColumn).apply {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                add(MediaStore.MediaColumns.RELATIVE_PATH)
+            }
+        }.toTypedArray()
         var deleted = false
         runCatching {
             context.contentResolver.query(
-                MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+                collectionUri,
                 projection,
-                selection,
+                "$nameColumn = ?",
                 arrayOf(fileName),
                 null
             )?.use { cursor ->
-                val idIndex = cursor.getColumnIndexOrThrow(MediaStore.Downloads._ID)
+                val idIndex = cursor.getColumnIndexOrThrow(idColumn)
+                val relativePathIndex = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    cursor.getColumnIndex(MediaStore.MediaColumns.RELATIVE_PATH)
+                } else {
+                    -1
+                }
                 while (cursor.moveToNext()) {
-                    val uri = ContentUris.withAppendedId(
-                        MediaStore.Downloads.EXTERNAL_CONTENT_URI,
-                        cursor.getLong(idIndex)
-                    )
+                    val relativePath = if (relativePathIndex >= 0) cursor.getString(relativePathIndex) else null
+                    val matchesPath = relativePaths.isEmpty() || relativePath == null || relativePaths.any { candidate ->
+                        relativePath.equals(candidate, ignoreCase = true)
+                    }
+                    if (!matchesPath) continue
+                    val uri = ContentUris.withAppendedId(collectionUri, cursor.getLong(idIndex))
                     deleted = context.contentResolver.delete(uri, null, null) > 0 || deleted
                 }
             }
@@ -327,8 +379,8 @@ object DownloadCenter {
         return deleted
     }
 
-    private fun deleteFromLocalDownloadsByName(context: Context, fileName: String?, title: String) {
-        if (fileName.isNullOrBlank()) return
+    private fun deleteFromLocalDownloadsByName(context: Context, fileName: String?, title: String): String? {
+        if (fileName.isNullOrBlank()) return null
         val seriesTitle = inferSeriesTitle(title)
         val baseDirs = listOfNotNull(
             context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS),
@@ -342,10 +394,29 @@ object DownloadCenter {
                 seriesTitle?.let { File(base, sanitizeFileNameForPath(it)) }
             )
         }
+        var deletedPath: String? = null
         candidateDirs.forEach { dir ->
             runCatching {
-                File(dir, fileName).takeIf { it.exists() }?.delete()
+                File(dir, fileName).takeIf { it.exists() }?.let { file ->
+                    if (file.delete()) {
+                        deletedPath = file.absolutePath
+                    }
+                }
             }
+        }
+        return deletedPath
+    }
+
+    private fun buildRelativePathCandidates(title: String): List<String> {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return emptyList()
+        val appFolder = "枫林晚TV"
+        val basePath = "${Environment.DIRECTORY_DOWNLOADS}/$appFolder"
+        val seriesTitle = inferSeriesTitle(title)
+            ?.let(::sanitizeFileNameForPath)
+            ?.takeIf { it.isNotBlank() }
+        return buildList {
+            add("$basePath/")
+            seriesTitle?.let { add("$basePath/$it/") }
         }
     }
 

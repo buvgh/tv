@@ -566,7 +566,7 @@ class HomeViewModel(application: android.app.Application) : androidx.lifecycle.A
             }.filter { (_, ok) -> ok }
                 .map { (site, _) -> site }
 
-            val curatedSites = (reachable + SourceRepository.getDefaultSites())
+            val curatedSites = (reachable + sitesSnapshot + SourceRepository.getDefaultSites())
                 .distinctBy { it.api }
 
             if (curatedSites.isNotEmpty()) {

@@ -1,4 +1,4 @@
-package com.example.myapplicationlibretv.ui.home
+﻿package com.example.myapplicationlibretv.ui.home
 
 import android.Manifest
 import android.content.ActivityNotFoundException
@@ -24,6 +24,7 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -38,8 +39,10 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.List
@@ -156,6 +159,7 @@ fun HomeScreen(
     var subscriptionInput by remember { mutableStateOf("") }
     var hiddenSettingsUnlocked by remember { mutableStateOf(false) }
     var versionTapCount by remember { mutableIntStateOf(0) }
+    var homeScrollToTopTrigger by remember { mutableIntStateOf(0) }
 
     // 实现“点击两下‘首页’刷新”的逻辑
     var lastHomeTabClickTime by remember { mutableStateOf(0L) }
@@ -267,8 +271,8 @@ fun HomeScreen(
                         if (selectedTab == 0) {
                             val currentTime = System.currentTimeMillis()
                             if (currentTime - lastHomeTabClickTime < 500) {
-                                // 双击逻辑
                                 viewModel.refreshAll()
+                                homeScrollToTopTrigger += 1
                             }
                             lastHomeTabClickTime = currentTime
                         } else {
@@ -308,173 +312,217 @@ fun HomeScreen(
                         .fillMaxWidth()
                         .navigationBarsPadding()
                 ) {
-                    val sourceListMaxHeight = maxHeight * 0.42f
+                    val compactLayout = maxWidth < 560.dp
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 8.dp)
+                            .fillMaxHeight(0.95f)
+                            .padding(horizontal = 16.dp, vertical = 8.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Text("订阅源", style = MaterialTheme.typography.titleLarge)
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(
-                            text = "当前共 ${sites.size} 个源",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        Spacer(modifier = Modifier.height(12.dp))
-                        OutlinedTextField(
-                            value = subscriptionInput,
-                            onValueChange = { subscriptionInput = it },
-                            modifier = Modifier.fillMaxWidth(),
-                            placeholder = { Text("粘贴订阅链接或 CMS API（支持多条）") },
-                            minLines = 3
-                        )
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            OutlinedButton(
-                                onClick = {
-                                    val text = clipboard.getText()?.text.orEmpty()
-                                    if (text.isNotBlank()) {
-                                        subscriptionInput = if (subscriptionInput.isBlank()) text else "$subscriptionInput\n$text"
-                                    }
-                                },
-                                modifier = Modifier.weight(1f)
-                            ) {
-                                Icon(Icons.Default.ContentPaste, contentDescription = null)
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text("粘贴")
-                            }
-                            Button(
-                                onClick = {
-                                    viewModel.importSubscriptions(subscriptionInput)
-                                    subscriptionInput = ""
-                                    showSourceSheet = false
-                                },
-                                enabled = !isLoading,
-                                modifier = Modifier.weight(1f)
-                            ) {
-                                Text("导入并检测")
-                            }
-                        }
-                        Spacer(modifier = Modifier.height(8.dp))
-                        OutlinedButton(
-                            onClick = { viewModel.fetchVideos() },
-                            enabled = !isLoading,
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Text("刷新列表")
-                        }
-                        Spacer(modifier = Modifier.height(12.dp))
-                        Surface(
-                            modifier = Modifier.fillMaxWidth(),
-                            shape = MaterialTheme.shapes.medium,
-                            color = MaterialTheme.colorScheme.surfaceVariant
-                        ) {
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(horizontal = 12.dp, vertical = 12.dp),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text("夜间模式")
-                                    Text(
-                                        text = "开启后使用深色界面，适合夜间观看。",
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                }
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Icon(
-                                        imageVector = if (darkModeEnabled) Icons.Default.DarkMode else Icons.Default.LightMode,
-                                        contentDescription = null,
-                                        tint = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                    Spacer(modifier = Modifier.width(8.dp))
-                                    Switch(
-                                        checked = darkModeEnabled,
-                                        onCheckedChange = onDarkModeChange
-                                    )
-                                }
-                            }
-                        }
-                        Spacer(modifier = Modifier.height(12.dp))
-                        Surface(
-                            modifier = Modifier.fillMaxWidth(),
-                            shape = MaterialTheme.shapes.medium,
-                            color = MaterialTheme.colorScheme.surfaceVariant
-                        ) {
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(horizontal = 12.dp, vertical = 12.dp),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text("首页按源显示")
-                                    Text(
-                                        text = "默认关闭。关闭时首页聚合推荐，开启后只显示当前所选源的资源。",
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                }
-                                Switch(
-                                    checked = homeDisplayBySourceEnabled,
-                                    onCheckedChange = viewModel::setHomeDisplayBySourceEnabled
-                                )
-                            }
-                        }
-                        if (hiddenSettingsUnlocked || adultContentEnabled) {
-                            Spacer(modifier = Modifier.height(12.dp))
-                            Surface(
-                                modifier = Modifier.fillMaxWidth(),
-                                shape = MaterialTheme.shapes.medium,
-                                color = MaterialTheme.colorScheme.surfaceVariant
-                            ) {
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(horizontal = 12.dp, vertical = 12.dp),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Column(modifier = Modifier.weight(1f)) {
-                                        Text("18+ 内容")
-                                        Text(
-                                            text = "默认关闭。关闭时严格过滤成人推荐和搜索结果。",
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                                        )
-                                    }
-                                    Switch(
-                                        checked = adultContentEnabled,
-                                        onCheckedChange = viewModel::setAdultContentEnabled
-                                    )
-                                }
-                            }
-                        }
-                        if (isLoading) {
-                            Spacer(modifier = Modifier.height(12.dp))
-                            LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-                        }
-                        if (!errorMessage.isNullOrBlank()) {
-                            Spacer(modifier = Modifier.height(12.dp))
-                            Text(text = errorMessage!!, color = MaterialTheme.colorScheme.error)
-                        }
-                        Spacer(modifier = Modifier.height(12.dp))
-                        Text("已加载源", style = MaterialTheme.typography.titleMedium)
-                        Spacer(modifier = Modifier.height(8.dp))
                         LazyColumn(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .heightIn(min = 220.dp, max = sourceListMaxHeight),
-                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                                .weight(1f),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
+                            item {
+                                Text("订阅源", style = MaterialTheme.typography.titleLarge)
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(
+                                    text = "当前共 ${sites.size} 个源",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            item {
+                                OutlinedTextField(
+                                    value = subscriptionInput,
+                                    onValueChange = { subscriptionInput = it },
+                                    modifier = Modifier.fillMaxWidth(),
+                                    placeholder = { Text("粘贴订阅链接或 CMS API（支持多条）") },
+                                    minLines = if (compactLayout) 2 else 3
+                                )
+                            }
+                            item {
+                                if (compactLayout) {
+                                    Column(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        OutlinedButton(
+                                            onClick = {
+                                                val text = clipboard.getText()?.text.orEmpty()
+                                                if (text.isNotBlank()) {
+                                                    subscriptionInput = if (subscriptionInput.isBlank()) text else "$subscriptionInput\n$text"
+                                                }
+                                            },
+                                            modifier = Modifier.fillMaxWidth()
+                                        ) {
+                                            Icon(Icons.Default.ContentPaste, contentDescription = null)
+                                            Spacer(modifier = Modifier.width(6.dp))
+                                            Text("粘贴")
+                                        }
+                                        Button(
+                                            onClick = {
+                                                viewModel.importSubscriptions(subscriptionInput)
+                                                subscriptionInput = ""
+                                                showSourceSheet = false
+                                            },
+                                            enabled = !isLoading,
+                                            modifier = Modifier.fillMaxWidth()
+                                        ) {
+                                            Text("导入并检测")
+                                        }
+                                    }
+                                } else {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        OutlinedButton(
+                                            onClick = {
+                                                val text = clipboard.getText()?.text.orEmpty()
+                                                if (text.isNotBlank()) {
+                                                    subscriptionInput = if (subscriptionInput.isBlank()) text else "$subscriptionInput\n$text"
+                                                }
+                                            },
+                                            modifier = Modifier.weight(1f)
+                                        ) {
+                                            Icon(Icons.Default.ContentPaste, contentDescription = null)
+                                            Spacer(modifier = Modifier.width(6.dp))
+                                            Text("粘贴")
+                                        }
+                                        Button(
+                                            onClick = {
+                                                viewModel.importSubscriptions(subscriptionInput)
+                                                subscriptionInput = ""
+                                                showSourceSheet = false
+                                            },
+                                            enabled = !isLoading,
+                                            modifier = Modifier.weight(1f)
+                                        ) {
+                                            Text("导入并检测")
+                                        }
+                                    }
+                                }
+                            }
+                            item {
+                                OutlinedButton(
+                                    onClick = { viewModel.fetchVideos() },
+                                    enabled = !isLoading,
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Text("刷新列表")
+                                }
+                            }
+                            item {
+                                Surface(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    shape = MaterialTheme.shapes.medium,
+                                    color = MaterialTheme.colorScheme.surfaceVariant
+                                ) {
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(horizontal = 12.dp, vertical = 12.dp),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text("夜间模式")
+                                            Text(
+                                                text = "开启后使用深色界面，适合夜间观看。",
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Icon(
+                                                imageVector = if (darkModeEnabled) Icons.Default.DarkMode else Icons.Default.LightMode,
+                                                contentDescription = null,
+                                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                            Spacer(modifier = Modifier.width(8.dp))
+                                            Switch(
+                                                checked = darkModeEnabled,
+                                                onCheckedChange = onDarkModeChange
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                            item {
+                                Surface(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    shape = MaterialTheme.shapes.medium,
+                                    color = MaterialTheme.colorScheme.surfaceVariant
+                                ) {
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(horizontal = 12.dp, vertical = 12.dp),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text("首页按源显示")
+                                            Text(
+                                                text = "默认关闭。关闭时首页聚合推荐，开启后只显示当前所选源的资源。",
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
+                                        Switch(
+                                            checked = homeDisplayBySourceEnabled,
+                                            onCheckedChange = viewModel::setHomeDisplayBySourceEnabled
+                                        )
+                                    }
+                                }
+                            }
+                            if (hiddenSettingsUnlocked || adultContentEnabled) {
+                                item {
+                                    Surface(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        shape = MaterialTheme.shapes.medium,
+                                        color = MaterialTheme.colorScheme.surfaceVariant
+                                    ) {
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(horizontal = 12.dp, vertical = 12.dp),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Column(modifier = Modifier.weight(1f)) {
+                                                Text("18+ 内容")
+                                                Text(
+                                                    text = "默认关闭。关闭时严格过滤成人推荐和搜索结果。",
+                                                    style = MaterialTheme.typography.bodySmall,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                )
+                                            }
+                                            Switch(
+                                                checked = adultContentEnabled,
+                                                onCheckedChange = viewModel::setAdultContentEnabled
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                            if (isLoading) {
+                                item {
+                                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                                }
+                            }
+                            if (!errorMessage.isNullOrBlank()) {
+                                item {
+                                    Text(text = errorMessage!!, color = MaterialTheme.colorScheme.error)
+                                }
+                            }
+                            item {
+                                Text("已加载源", style = MaterialTheme.typography.titleMedium)
+                            }
                             items(sites, key = { it.api }) { site ->
                                 Surface(
                                     modifier = Modifier
@@ -515,27 +563,29 @@ fun HomeScreen(
                                 }
                             }
                         }
-                        Spacer(modifier = Modifier.height(8.dp))
-                        TextButton(
-                            onClick = { showSourceSheet = false },
-                            modifier = Modifier.align(Alignment.End)
-                        ) {
-                            Text("关闭")
-                        }
-                        Text(
-                            text = "版本 ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        Row(
                             modifier = Modifier
-                                .padding(bottom = 8.dp)
-                                .clickable {
+                                .fillMaxWidth()
+                                .padding(top = 4.dp, bottom = 8.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "版本 ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.clickable {
                                     versionTapCount += 1
                                     if (versionTapCount >= 5) {
                                         hiddenSettingsUnlocked = true
                                         versionTapCount = 0
                                     }
                                 }
-                        )
+                            )
+                            TextButton(onClick = { showSourceSheet = false }) {
+                                Text("关闭")
+                            }
+                        }
                     }
                 }
             }
@@ -557,6 +607,7 @@ fun HomeScreen(
                     currentSiteName = currentSite?.name,
                     isLoading = isLoading,
                     errorMessage = errorMessage,
+                    scrollToTopTrigger = homeScrollToTopTrigger,
                     onCategorySelected = viewModel::selectHomeCategory,
                     onRetry = { viewModel.fetchVideos() },
                     onVideoClick = onVideoClick
@@ -643,12 +694,19 @@ private fun HomeTabContent(
     currentSiteName: String?,
     isLoading: Boolean,
     errorMessage: String?,
+    scrollToTopTrigger: Int,
     onCategorySelected: (String) -> Unit,
     onRetry: () -> Unit,
     onVideoClick: (siteKey: String, videoId: Int, videoTitle: String) -> Unit
 ) {
     BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
         val horizontalPadding = remember(maxWidth) { calculateContentHorizontalPadding(maxWidth) }
+        val gridState = rememberLazyGridState()
+        LaunchedEffect(scrollToTopTrigger) {
+            if (scrollToTopTrigger > 0) {
+                gridState.animateScrollToItem(0)
+            }
+        }
         if (isLoading && videoList.isEmpty()) {
             LoadingMediaGridSkeleton(modifier = Modifier.fillMaxSize())
             return@BoxWithConstraints
@@ -674,50 +732,10 @@ private fun HomeTabContent(
         }
 
         Column(modifier = Modifier.fillMaxSize()) {
-            Surface(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = horizontalPadding, vertical = 8.dp),
-                shape = RoundedCornerShape(20.dp),
-                color = MaterialTheme.colorScheme.surfaceVariant
-            ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 14.dp, vertical = 12.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column {
-                        Text(
-                            text = if (displayBySource) {
-                                "${currentSiteName ?: "当前源"}资源"
-                            } else {
-                                "热门影视推荐"
-                            },
-                            style = MaterialTheme.typography.titleMedium
-                        )
-                        Text(
-                            text = if (displayBySource) {
-                                "当前按所选源展示，可结合分类标签快速筛选。"
-                            } else {
-                                "下拉立即刷新全网热门，可按分类标签筛选。"
-                            },
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                    Text(
-                        text = "v${BuildConfig.VERSION_NAME}",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            }
             if (categories.size > 1) {
                 LazyRow(
                     modifier = Modifier.fillMaxWidth(),
-                    contentPadding = PaddingValues(horizontal = horizontalPadding, vertical = 4.dp),
+                    contentPadding = PaddingValues(horizontal = horizontalPadding, vertical = 8.dp),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     items(categories, key = { it }) { category ->
@@ -739,6 +757,7 @@ private fun HomeTabContent(
             }
             MediaGrid(
                 modifier = Modifier.fillMaxSize(),
+                state = gridState,
                 outerHorizontalPadding = horizontalPadding,
                 itemsCount = videoList.size,
                 key = { index -> "${videoList[index].siteKey}:${videoList[index].video.id}" },
@@ -1292,7 +1311,7 @@ private fun DownloadsTabContent(
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(180.dp),
+                            .heightIn(min = 140.dp),
                         contentAlignment = Alignment.Center
                     ) {
                         Text(emptyPageText, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -1419,22 +1438,49 @@ private fun DownloadSeriesFolderCard(
             .fillMaxWidth()
             .clickable(onClick = onClick)
     ) {
-        Row(
-            modifier = Modifier.padding(12.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Icon(Icons.Default.Folder, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
-            Spacer(modifier = Modifier.width(12.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Text(title, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text(
-                    "$count 集 · $summary",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-            IconButton(onClick = onDelete) {
-                Icon(Icons.Default.Delete, contentDescription = "删除分组")
+        BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+            val compact = maxWidth < 380.dp
+            if (compact) {
+                Column(modifier = Modifier.padding(12.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.Folder, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Text(
+                            title,
+                            style = MaterialTheme.typography.titleMedium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f)
+                        )
+                        IconButton(onClick = onDelete) {
+                            Icon(Icons.Default.Delete, contentDescription = "删除分组")
+                        }
+                    }
+                    Text(
+                        "$count 集 · $summary",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            } else {
+                Row(
+                    modifier = Modifier.padding(12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(Icons.Default.Folder, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(title, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(
+                            "$count 集 · $summary",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    IconButton(onClick = onDelete) {
+                        Icon(Icons.Default.Delete, contentDescription = "删除分组")
+                    }
+                }
             }
         }
     }
@@ -1517,7 +1563,7 @@ private fun DownloadTaskCard(
 ) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(12.dp)) {
-            Text(task.title, style = MaterialTheme.typography.titleMedium)
+            Text(task.title, style = MaterialTheme.typography.titleMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
             Spacer(modifier = Modifier.height(6.dp))
             Text(
                 when (task.status) {
@@ -1746,6 +1792,7 @@ fun VideoItemCard(
 @Composable
 private fun MediaGrid(
     modifier: Modifier = Modifier,
+    state: LazyGridState = rememberLazyGridState(),
     outerHorizontalPadding: Dp = 10.dp,
     itemsCount: Int,
     key: (Int) -> Any,
@@ -1755,6 +1802,7 @@ private fun MediaGrid(
         val minCellWidth = remember(maxWidth) { calculateGridMinSize(maxWidth) }
         LazyVerticalGrid(
             columns = GridCells.Adaptive(minSize = minCellWidth),
+            state = state,
             contentPadding = PaddingValues(horizontal = outerHorizontalPadding, vertical = 8.dp),
             horizontalArrangement = Arrangement.spacedBy(10.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
