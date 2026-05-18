@@ -497,7 +497,7 @@ fun HomeScreen(
                                             Column(modifier = Modifier.weight(1f)) {
                                                 Text("18+ 内容")
                                                 Text(
-                                                    text = "默认关闭。关闭时严格过滤成人推荐和搜索结果。",
+                                                    text = "默认关闭。关闭时严格过滤成人推荐和搜索结果；开启后首页会从所有已加载源随机混合推荐。",
                                                     style = MaterialTheme.typography.bodySmall,
                                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                                 )

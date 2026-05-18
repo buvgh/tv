@@ -276,10 +276,15 @@ class HomeViewModel(application: android.app.Application) : androidx.lifecycle.A
                         .let(::applyContentFilter)
                         .distinctBy { "${it.siteKey}:${it.video.id}" }
                 } else {
-                    val platformTrending = withTimeoutOrNull(12_000L) {
-                        fetchPlatformHotlistVideos(sitesSnapshot)
-                    }.orEmpty()
-                    if (platformTrending.size >= 72) {
+                    val adultModeEnabled = _adultContentEnabled.value
+                    val platformTrending = if (adultModeEnabled) {
+                        emptyList()
+                    } else {
+                        withTimeoutOrNull(12_000L) {
+                            fetchPlatformHotlistVideos(sitesSnapshot)
+                        }.orEmpty()
+                    }
+                    if (!adultModeEnabled && platformTrending.size >= 72) {
                         platformTrending
                     } else {
                         val results = fetchSiteResults(
@@ -1424,7 +1429,11 @@ class HomeViewModel(application: android.app.Application) : androidx.lifecycle.A
         refreshToken: Long? = null
     ): List<Site> {
         if (searchKeyword.isNullOrBlank()) {
-            val prioritized = prioritizeMainlandSites(allSites, currentSite.value?.key)
+            val prioritized = if (_adultContentEnabled.value) {
+                prioritizeRandomSites(allSites, currentSite.value?.key, refreshToken)
+            } else {
+                prioritizeMainlandSites(allSites, currentSite.value?.key)
+            }
             if (prioritized.size <= MAX_TRENDING_SITES) return prioritized
             return prioritized
                 .take(MAX_TRENDING_SITES)
@@ -1457,6 +1466,20 @@ class HomeViewModel(application: android.app.Application) : androidx.lifecycle.A
                 compareByDescending<Site> { if (it.key == selectedSiteKey || it.api == selectedSiteKey) 1 else 0 }
                     .thenByDescending { mainlandSiteScore(it) }
                     .thenByDescending { scoreMap[it.api] ?: 0 }
+                    .thenBy { it.name }
+            )
+    }
+
+    private fun prioritizeRandomSites(
+        sites: List<Site>,
+        selectedSiteKey: String?,
+        refreshToken: Long?
+    ): List<Site> {
+        val seed = refreshToken ?: System.nanoTime()
+        return sites
+            .shuffled(Random(seed))
+            .sortedWith(
+                compareByDescending<Site> { if (it.key == selectedSiteKey || it.api == selectedSiteKey) 1 else 0 }
                     .thenBy { it.name }
             )
     }

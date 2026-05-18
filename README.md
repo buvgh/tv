@@ -4,12 +4,12 @@
 
 ## 下载 APK
 
-- [枫林晚TV-v1.8.13-release-signed.apk](./releases/%E6%9E%AB%E6%9E%97%E6%99%9ATV-v1.8.13-release-signed.apk)
+- [枫林晚TV-v1.8.14-release-signed.apk](./releases/%E6%9E%AB%E6%9E%97%E6%99%9ATV-v1.8.14-release-signed.apk)
 
 ## 当前版本
 
-- `versionName`: `1.8.13`
-- `versionCode`: `93`
+- `versionName`: `1.8.14`
+- `versionCode`: `94`
 
 ## 主要功能
 
